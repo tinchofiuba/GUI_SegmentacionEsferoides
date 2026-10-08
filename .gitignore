@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Config local de backends (rutas de esta máquina)
+config/backends.yaml

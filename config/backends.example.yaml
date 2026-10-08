@@ -1,0 +1,47 @@
+# Copiar a config/backends.yaml (ignorado por git) y ajustar rutas.
+# Cada backend es un proceso aparte con su propio Python: la GUI no importa
+# ningún modelo. Protocolo: docs/protocol.md.
+backends:
+  - name: u-resnet
+    cwd: ~/repos/SegmentacionEsferoides
+    install:
+      - {cmd: [git, clone, "git@github.com:tinchofiuba/SegmentacionEsferoides.git", "{cwd}"], skip_if: "{cwd}/.git"}
+      - {cmd: [uv, sync], skip_if: "{cwd}/.venv"}
+    command:
+      - ~/repos/SegmentacionEsferoides/.venv/bin/python
+      - -m
+      - u_resnet_segesferoides.serve
+      - --models-dir
+      - outputs/models
+      - --model-name
+      - insitu_3t3
+
+  # spheroid-seg (JAX, repo de otra persona): no habla el protocolo, así que se
+  # usa el backend `cli`. Cada predicción relanza el comando (~7-10 s de
+  # arranque). La GUI recorta la zona y le pasa el recorte; no hay magnificación.
+  # Los checkpoints se listan con `models_glob`; el más reciente arranca cargado.
+  # `cleanup` borra la carpeta outputs/infer/<run> que crea cada llamada (solo
+  # si está dentro de `cwd`).
+  - name: spheroid-seg
+    type: cli
+    cwd: ~/repos/spheroid-seg
+    install:                      # lo corre el botón "Instalar backend" si no está instalado
+      - {cmd: [git, clone, "https://github.com/edgardomarchi/spheroid-seg", "{cwd}"], skip_if: "{cwd}/.git"}
+      - {cmd: [uv, sync], skip_if: "{cwd}/.venv"}
+    command:
+      - .venv/bin/python
+      - -m
+      - spheroid_seg.infer
+      - --config
+      - configs/base.yaml
+      - --checkpoint
+      - "{model}"
+      - --input
+      - "{image}"
+    models_glob: ~/repos/spheroid-seg/outputs/runs/*/checkpoints/best_checkpoint.msgpack
+    output_dir_regex: "Output directory: (.+)"
+    mask: "{output_dir}/predictions/{stem}.png"
+    cleanup: true
+    classes:                      # fondo / célula suelta / agregado (class_mapping de configs/base.yaml)
+      - {id: 1, name: células sueltas, color: [0, 255, 0]}
+      - {id: 2, name: agregados,       color: [255, 255, 0]}
