@@ -3,8 +3,9 @@ todo lo que necesita (clases, colores, magnificaciones, modelos disponibles,
 predicción) se lo pide a un backend por el protocolo de docs/protocol.md.
 """
 
-import json
+import csv
 import os
+import re
 
 import cv2
 import numpy as np
@@ -32,6 +33,7 @@ from gui_segesferoides.editing import (
     UndoStack,
     fill_holes,
     fill_object_holes,
+    measure_objects,
     object_contours,
     object_region,
     object_stats,
@@ -214,6 +216,10 @@ class MainWindow(QMainWindow):
         self.predict_button.setEnabled(False)
         predict.addWidget(self.predict_button)
         predict.addStretch()
+        self.export_button = QPushButton("Exportar resultados")
+        self.export_button.clicked.connect(self._on_export)
+        self.export_button.setEnabled(False)
+        predict.addWidget(self.export_button)
 
         self.status_label = QLabel("Abrí una imagen para empezar.")
         layout.addWidget(self.status_label)
@@ -318,6 +324,7 @@ class MainWindow(QMainWindow):
         self.install_button.setVisible(self.uninstalled is not None)
         self.install_button.setEnabled(free and self.uninstalled is not None
                                        and can_install(self.uninstalled))
+        self.export_button.setEnabled(free and has_backend and self.mask is not None)
         self.predict_button.setEnabled(
             free and has_backend and self.model_loaded and self.full_res_image is not None
         )
@@ -463,9 +470,30 @@ class MainWindow(QMainWindow):
 
         self.accept_button.setEnabled(True)
         self._update_controls()
+        self._select_magnification_from_name(path)
         self.status_label.setText(
             f"Imagen cargada: {full_w}x{full_h}px. Rueda = zoom, botón derecho = mover."
         )
+
+    def _select_magnification_from_name(self, path):
+        """Si el nombre del archivo trae una magnificación (`..._10x`, `-4X`),
+        la elige en el combo, sin distinguir mayúsculas. Si no está entre las
+        opciones del backend, no toca nada."""
+        stem = os.path.splitext(os.path.basename(path))[0]
+        for found in re.findall(r"(?<![A-Za-z0-9])(\d+)[xX](?![A-Za-z0-9])", stem):
+            for i in range(self.combo_magnification.count()):
+                if self.combo_magnification.itemText(i).lower() == f"{found}x":
+                    self.combo_magnification.setCurrentIndex(i)
+                    return
+
+    def _mask_filename(self):
+        """`<imagen>-Mask.png`: el nombre que espera el entrenamiento de
+        u-resnet (`prepare_data`), que busca la máscara de `nombre_10x.png`
+        como `nombre-Mask.png`. Por eso se quita del nombre una magnificación
+        final (`_4x`, `-10X`); la magnificación no va en el nombre."""
+        stem = os.path.splitext(os.path.basename(self.image_path))[0]
+        stem = re.sub(r"[_\-\s]*(?<![A-Za-z0-9])\d+[xX]$", "", stem) or stem
+        return f"{stem}-Mask.png"
 
     def _last_dir(self, key):
         value = self.settings.value(key, "")
@@ -609,10 +637,9 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-        stem = os.path.splitext(os.path.basename(self.image_path))[0]
         default_dir = self._last_dir("save_dir") or os.path.dirname(self.image_path)
         path, _ = QFileDialog.getSaveFileName(
-            self, "Guardar máscara", os.path.join(default_dir, f"{stem}_Taggeada.png"),
+            self, "Guardar máscara", os.path.join(default_dir, self._mask_filename()),
             "PNG (*.png)",
         )
         if not path:
@@ -622,22 +649,60 @@ class MainWindow(QMainWindow):
 
     def save_to(self, path):
         try:
-            save_mask(path, self.mask, self.palette)
-            # Registro de origen: una máscara que salió de un modelo no debería
-            # usarse para evaluarlo sin saberlo.
-            with open(os.path.splitext(path)[0] + ".origin.json", "w") as f:
-                json.dump({
-                    "origin": self.origin,
-                    "image": os.path.basename(self.image_path),
-                    "backend": self.backend.info.name if self.backend else None,
-                    "model": self.combo_model.currentData() if self.model_loaded else None,
-                    "classes": {str(cid): list(rgb) for cid, rgb in self.palette.items()},
-                }, f, indent=2)
+            save_mask(path, self.mask, self.palette, mode="ids")
         except OSError as exc:
             QMessageBox.critical(self, "Error al guardar", str(exc))
             return
         self.dirty = False
-        self.status_label.setText(f"Máscara guardada en {path} (origen: {self.origin})")
+        self.status_label.setText(f"Máscara guardada en {path}")
+
+    def _on_export(self):
+        if self.mask is None:
+            return
+        stem = os.path.splitext(os.path.basename(self.image_path))[0]
+        default_dir = self._last_dir("save_dir") or os.path.dirname(self.image_path)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar resultados", os.path.join(default_dir, f"{stem}_resultados.csv"),
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        self.settings.setValue("save_dir", os.path.dirname(path))
+        self.export_results(path)
+
+    def export_results(self, csv_path):
+        """CSV con una fila por objeto + PNG de 1 canal con los ids de clase
+        del backend (0 = fondo), junto al CSV, como `<imagen>-Mask.png`."""
+        mask_path = os.path.join(os.path.dirname(csv_path), self._mask_filename())
+        names = {c.id: c.name for c in self.backend.info.classes}
+        backend = self.backend.info.name
+        model = self.combo_model.currentData() if self.model_loaded else ""
+        image = os.path.basename(self.image_path)
+        fields = ["image", "backend", "model", "object", "class_id", "class_name",
+                  "centroid_x", "centroid_y", "bbox_x", "bbox_y", "bbox_w", "bbox_h",
+                  "area_px", "perimeter_px", "equivalent_diameter_px", "circularity"]
+        try:
+            rows = measure_objects(self.mask)
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                for i, r in enumerate(rows, 1):
+                    writer.writerow({
+                        "image": image, "backend": backend, "model": model, "object": i,
+                        "class_id": r["class_id"], "class_name": names.get(r["class_id"], ""),
+                        "centroid_x": f"{r['centroid_x']:.1f}", "centroid_y": f"{r['centroid_y']:.1f}",
+                        "bbox_x": r["bbox_x"], "bbox_y": r["bbox_y"],
+                        "bbox_w": r["bbox_w"], "bbox_h": r["bbox_h"],
+                        "area_px": r["area"], "perimeter_px": f"{r['perimeter']:.2f}",
+                        "equivalent_diameter_px": f"{r['equivalent_diameter']:.2f}",
+                        "circularity": f"{r['circularity']:.4f}",
+                    })
+            save_mask(mask_path, self.mask, self.palette, mode="ids")
+        except OSError as exc:
+            QMessageBox.critical(self, "Error al exportar", str(exc))
+            return
+        self.status_label.setText(
+            f"Exportados {len(rows)} objetos: {csv_path} y {os.path.basename(mask_path)}")
 
     def _confirm_discard(self):
         if not self.dirty:

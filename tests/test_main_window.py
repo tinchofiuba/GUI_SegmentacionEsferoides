@@ -96,7 +96,7 @@ def test_zone_prediction_only_touches_zone(qapp, window, image_path):
     assert xs.min() >= 10 and xs.max() < 90 and ys.min() >= 20 and ys.max() < 80
 
 
-def test_save_writes_color_mask_and_origin(qapp, window, image_path, tmp_path):
+def test_save_writes_id_mask(qapp, window, image_path, tmp_path):
     window.open_image(image_path)
     window._load_model("b")
     wait_idle(qapp, window)
@@ -104,11 +104,9 @@ def test_save_writes_color_mask_and_origin(qapp, window, image_path, tmp_path):
     wait_idle(qapp, window)
     out = str(tmp_path / "cel_1_Taggeada.png")
     window.save_to(out)
-    rgb = cv2.cvtColor(cv2.imread(out), cv2.COLOR_BGR2RGB)
-    assert (rgb[window.mask == 2] == (255, 255, 0)).all()
-    meta = json.loads((tmp_path / "cel_1_Taggeada.origin.json").read_text())
-    assert meta["origin"] == "modelo" and meta["backend"] == "fake" and meta["model"] == "b"
-    assert meta["classes"]["5"] == [0, 255, 255]
+    saved = cv2.imread(out, cv2.IMREAD_UNCHANGED)
+    assert saved.ndim == 2 and (saved == window.mask).all()
+    assert not (tmp_path / "cel_1_Taggeada.origin.json").exists()
     assert not window.dirty
 
 
@@ -206,3 +204,54 @@ def test_uninstalled_without_install_steps_disables_button(qapp, tmp_path):
     w = MainWindow([spec])
     assert w.uninstalled is spec and not w.install_button.isEnabled()
     w.close()
+
+
+def test_export_results_writes_csv_and_id_png(qapp, window, image_path, tmp_path):
+    import csv
+
+    window.open_image(image_path)
+    window._load_model("b")
+    wait_idle(qapp, window)
+    window.mask[:] = 0
+    window.mask[10:20, 10:20] = 1
+    window.mask[30:40, 30:50] = 5
+    window.mask[60:70, 60:70] = 5
+    assert window.export_button.isEnabled()
+    out = str(tmp_path / "res.csv")
+    window.export_results(out)
+    rows = list(csv.DictReader(open(out, encoding="utf-8")))
+    assert [(r["class_id"], r["class_name"], r["area_px"]) for r in rows] == [
+        ("1", "chicas", "100"), ("5", "raras", "200"), ("5", "raras", "100")]
+    assert rows[0]["backend"] == "fake" and rows[0]["circularity"]
+    ids = cv2.imread(str(tmp_path / "cel_1-Mask.png"), cv2.IMREAD_UNCHANGED)
+    assert ids.ndim == 2 and set(np.unique(ids)) == {0, 1, 5}
+
+
+def test_magnification_taken_from_file_name(qapp, window, image_path, tmp_path):
+    import shutil
+
+    def opened(name):
+        p = tmp_path / name
+        shutil.copy(image_path, p)
+        window.combo_magnification.setCurrentIndex(0)
+        window.open_image(str(p))
+        return window.combo_magnification.currentText()
+
+    assert opened("prueba_10X.png") == "10x"
+    assert opened("prueba-10x.png") == "10x"
+    assert opened("prueba_4x_b.png") == "4x"
+    assert opened("prueba_8x.png") == "4x"       # no está en el combo: no toca nada
+    assert opened("prueba_210x.png") == "4x"     # 210x no es 10x
+
+
+def test_mask_filename_matches_what_training_expects(qapp, window, image_path, tmp_path):
+    import shutil
+
+    for name, expected in [("nombreimg_10x.png", "nombreimg-Mask.png"),
+                           ("nombreimg-4X.png", "nombreimg-Mask.png"),
+                           ("20 - 4d 3T3.tiff", "20 - 4d 3T3-Mask.png"),
+                           ("a_10x_b.png", "a_10x_b-Mask.png")]:
+        p = tmp_path / name
+        shutil.copy(image_path, p)
+        window.image_path = str(p)
+        assert window._mask_filename() == expected

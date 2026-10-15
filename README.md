@@ -23,9 +23,13 @@ uv run gui-segesferoides
   la misma la deselecciona. Medidas en píxeles.
 - Rueda = zoom, botón derecho/central = mover, `[` `]` = tamaño de la
   herramienta, F = ajustar, M = ver/ocultar máscara, 1-9 = clase.
-- *Aceptar* (Ctrl+S) guarda `<imagen>_Taggeada.png` (un color por clase, según
-  la paleta del backend) y `<imagen>_Taggeada.origin.json` con el origen
-  (`manual` / `modelo` / `modelo_corregido`).
+- *Aceptar* (Ctrl+S) guarda `<imagen>-Mask.png`: PNG de 1 canal con el id de
+  clase de cada píxel (0 = fondo), el formato que lee el entrenamiento de
+  u-resnet. Si la imagen termina en `_4x` / `_10x`, ese sufijo se quita del
+  nombre (u-resnet busca `nombre-Mask.png` para `nombre_10x.png`). La
+  magnificación se detecta del nombre al abrir y solo se usa para predecir.
+- *Exportar resultados* escribe un CSV con una fila por objeto (clase y las
+  medidas del análisis de partícula, en píxeles) y la misma máscara de ids.
 
 Las clases, colores y magnificaciones los declara el backend: la GUI no tiene
 ninguna clase escrita en el código.

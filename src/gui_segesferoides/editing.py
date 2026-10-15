@@ -104,6 +104,28 @@ def object_stats(region):
     }
 
 
+def measure_objects(mask):
+    """Una fila por objeto (componente 4-conexo de una misma clase), con las
+    mismas medidas que el análisis de partícula (`object_stats`) más la clase,
+    el centroide y el bbox. Ordenadas por clase y luego por posición (y, x)."""
+    rows = []
+    for class_id in (int(c) for c in np.unique(mask) if c != 0):
+        n, labels, boxes, centroids = cv2.connectedComponentsWithStats(
+            (mask == class_id).astype(np.uint8), connectivity=4)
+        for k in range(1, n):
+            x, y, w, h, _ = boxes[k]
+            region = labels[y : y + h, x : x + w] == k
+            rows.append({
+                "class_id": class_id,
+                "centroid_x": float(centroids[k][0]),
+                "centroid_y": float(centroids[k][1]),
+                "bbox_x": int(x), "bbox_y": int(y), "bbox_w": int(w), "bbox_h": int(h),
+                **object_stats(region),
+            })
+    rows.sort(key=lambda r: (r["class_id"], r["bbox_y"], r["bbox_x"]))
+    return rows
+
+
 def save_mask(path, mask, palette, mode="color"):
     """Guarda `mask` (ids de clase; 0 = fondo).
 
