@@ -36,7 +36,8 @@ def window(qapp, tmp_path, monkeypatch):
     QSettings.setPath(QSettings.NativeFormat, QSettings.UserScope, str(tmp_path / "qs"))
     monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: errors.append(a[2])))
     errors.clear()
-    w = MainWindow([BackendSpec("fake", [sys.executable, FAKE])])
+    w = MainWindow([BackendSpec("fake", [sys.executable, FAKE])],
+                   calibration_path=str(tmp_path / "calibration.json"))
     wait_idle(qapp, w)
     yield w
     w.dirty = False
@@ -186,7 +187,7 @@ def test_uninstalled_backend_offers_install_then_connects(qapp, tmp_path, monkey
     asked = []
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
-    w = MainWindow([spec])
+    w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"))
     qapp.processEvents()
     assert w.backend is None and w.uninstalled is spec
     assert not w.install_button.isHidden() and w.install_button.isEnabled()
@@ -201,7 +202,7 @@ def test_uninstalled_backend_offers_install_then_connects(qapp, tmp_path, monkey
 
 def test_uninstalled_without_install_steps_disables_button(qapp, tmp_path):
     spec = BackendSpec("sin-pasos", ["no/existe"], cwd=str(tmp_path / "nada"))
-    w = MainWindow([spec])
+    w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"))
     assert w.uninstalled is spec and not w.install_button.isEnabled()
     w.close()
 
@@ -255,3 +256,82 @@ def test_mask_filename_matches_what_training_expects(qapp, window, image_path, t
         shutil.copy(image_path, p)
         window.image_path = str(p)
         assert window._mask_filename() == expected
+
+
+def test_analyze_shows_reference_bars_when_backend_has_stats(window, image_path):
+    _window_with_two_particles(window, image_path)
+    window.combo_magnification.setCurrentText("4x")
+    window._on_object_clicked(25, 25)              # clase 2, área 1500: dentro de [1000, 2000]
+    dialog = window.particle_dialog
+    assert dialog.bars["area"].isVisibleTo(dialog) and dialog.bars["area"].inside
+    assert dialog.bars["circularity"].isVisibleTo(dialog)
+    assert not dialog.bars["equivalent_diameter"].isVisibleTo(dialog)   # el backend no la trae
+    assert dialog._counts == [("chicas", 30), ("grandes", 10)]
+    window._on_object_clicked(120, 120)            # clase 1: solo trae n, sin métricas
+    assert not any(b.isVisibleTo(dialog) for b in dialog.bars.values())
+    window.combo_magnification.setCurrentText("10x")   # sin estadística a 10x: nada que mostrar
+    window._on_object_clicked(25, 25)
+    assert not any(b.isVisibleTo(dialog) for b in dialog.bars.values())
+
+
+def test_calibration_changes_displayed_units_and_persists(window, image_path, tmp_path):
+    _window_with_two_particles(window, image_path)
+    window.combo_magnification.setCurrentText("4x")
+    window._on_object_clicked(25, 25)
+    assert window.particle_dialog.label_area.text() == "1500 px²"
+    window.calibration.set("4x", 2, "µm")          # 1 px = 2 µm
+    window.calibration.display_unit = "mm"
+    window.calibration.save()
+    window._refresh_particle()
+    assert window.particle_dialog.label_area.text() == "0.006000 mm²"
+    window.combo_magnification.setCurrentText("10x")   # sin calibrar: píxeles
+    window._refresh_particle()
+    assert window.particle_dialog.label_area.text() == "1500 px²"
+    from gui_segesferoides.calibration import Calibration
+    again = Calibration(str(tmp_path / "calibration.json"))
+    assert again.entries == {"4x": (2.0, "µm")} and again.display_unit == "mm"
+    assert again.um_per_px("4x") == 2.0
+
+
+def test_calibration_dialog_edits_calibration(qapp, tmp_path):
+    from gui_segesferoides.calibration import Calibration
+    from gui_segesferoides.calibration_dialog import CalibrationDialog
+    cal = Calibration(str(tmp_path / "c.json"))
+    d = CalibrationDialog(cal)
+    spin, unit = d.rows["10x"]
+    spin.setValue(1); unit.setCurrentText("mm")
+    d.combo_display.setCurrentText("µm")
+    d._accept()
+    assert cal.um_per_px("10x") == 1000 and cal.um_per_px("4x") is None
+    assert cal.scale("10x").factor == 1000 and cal.scale("4x").unit == "px"
+
+
+def test_export_attaches_reference_stats_only_when_enabled(qapp, window, image_path, tmp_path):
+    import csv
+
+    window.open_image(image_path)
+    window.combo_magnification.setCurrentText("4x")
+    window.mask[:] = 0
+    window.mask[10:50, 10:50] = 2          # área 1600, dentro de [1000, 2000]
+    window.mask[100:110, 100:110] = 5      # el modelo no tiene estadística de esta clase
+    off, on = str(tmp_path / "off.csv"), str(tmp_path / "on.csv")
+    window.export_results(off)
+    assert "ref_n" not in csv.DictReader(open(off, encoding="utf-8")).fieldnames
+    window.calibration.csv_stats = True
+    window.export_results(on)
+    rows = list(csv.DictReader(open(on, encoding="utf-8")))
+    assert (rows[0]["ref_n"], rows[0]["ref_area_p5"], rows[0]["ref_area_p95"],
+            rows[0]["ref_area_in_range"]) == ("10", "1000", "2000", "yes")
+    assert rows[0]["ref_diameter_p5"] == ""          # el backend no la trae
+    assert rows[1]["ref_n"] == "" and rows[1]["ref_area_in_range"] == ""
+
+
+def test_csv_stats_option_persists(qapp, tmp_path):
+    from gui_segesferoides.calibration import Calibration
+    from gui_segesferoides.calibration_dialog import CalibrationDialog
+    cal = Calibration(str(tmp_path / "c.json"))
+    d = CalibrationDialog(cal)
+    d.check_csv_stats.setChecked(True)
+    d._accept()
+    cal.save()
+    assert Calibration(str(tmp_path / "c.json")).csv_stats is True

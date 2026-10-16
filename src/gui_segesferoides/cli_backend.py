@@ -34,8 +34,9 @@ class CliBackend:
 
     command           comando con {image} y {model}
     classes           [{id, name, color: [r, g, b]}]
-    models_glob       patrón de archivos/carpetas de modelo; {model} es cada
-                      coincidencia (la más reciente arranca cargada)
+    models_glob       patrón (o lista de patrones) de archivos/carpetas de
+                      modelo; {model} es cada coincidencia (la más reciente
+                      arranca cargada)
     mask              dónde queda la máscara: ruta con {output_dir} y {stem}
                       (stem = nombre de la imagen sin extensión)
     output_dir_regex  regex con un grupo sobre stdout que da {output_dir}
@@ -52,7 +53,8 @@ class CliBackend:
         self.mask_template = o["mask"]
         self.output_dir_regex = re.compile(o["output_dir_regex"]) if o.get("output_dir_regex") else None
         self.cleanup = bool(o.get("cleanup", False))
-        self.models_glob = os.path.expanduser(o["models_glob"]) if o.get("models_glob") else None
+        globs = o.get("models_glob") or []
+        self.models_globs = [os.path.expanduser(g) for g in ([globs] if isinstance(globs, str) else globs)]
         self.model = None
         self.info = BackendInfo(
             name=spec.name,
@@ -67,9 +69,8 @@ class CliBackend:
 
     # ---------- API ----------
     def _scan_models(self):
-        if not self.models_glob:
-            return []
-        paths = sorted(glob.glob(self.models_glob), key=os.path.getmtime, reverse=True)
+        paths = {p for pattern in self.models_globs for p in glob.glob(pattern)}
+        paths = sorted(paths, key=os.path.getmtime, reverse=True)
         return [ModelEntry(p, self._label(p), current=(i == 0)) for i, p in enumerate(paths)]
 
     @staticmethod
@@ -80,6 +81,9 @@ class CliBackend:
 
     def list_models(self):
         return [ModelEntry(m.id, m.label, m.note, m.id == self.model) for m in self._scan_models()]
+
+    def reference_stats(self):
+        return None  # el comando externo no expone estadística de entrenamiento
 
     def load_model(self, model_id):
         if not os.path.exists(model_id):

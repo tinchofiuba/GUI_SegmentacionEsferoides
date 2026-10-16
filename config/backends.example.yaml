@@ -38,7 +38,9 @@ backends:
       - "{model}"
       - --input
       - "{image}"
-    models_glob: ~/repos/spheroid-seg/outputs/runs/*/checkpoints/best_checkpoint.msgpack
+    models_glob:                  # un patrón o una lista
+      - ~/repos/spheroid-seg/outputs/runs/*/checkpoints/best_checkpoint.msgpack
+      - ~/repos/spheroid-seg/colab_*/checkpoints/best_checkpoint.msgpack   # corridas bajadas de Colab
     output_dir_regex: "Output directory: (.+)"
     mask: "{output_dir}/predictions/{stem}.png"
     cleanup: true

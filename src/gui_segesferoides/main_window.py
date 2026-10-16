@@ -28,6 +28,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from gui_segesferoides.calibration import Calibration
+from gui_segesferoides.calibration_dialog import CalibrationDialog
 from gui_segesferoides.config import BackendSpec, create_backend
 from gui_segesferoides.editing import (
     UndoStack,
@@ -64,6 +66,13 @@ TOOL_LABELS = [
 ]
 
 
+# (clave en la estadística de referencia, clave en object_stats), en el orden del CSV
+REFERENCE_METRICS = [("area", "area"), ("diameter", "equivalent_diameter"),
+                     ("circularity", "circularity")]
+REFERENCE_FIELDS = ["ref_n"] + [f"ref_{k}_{q}" for k, _ in REFERENCE_METRICS
+                                for q in ("p5", "mean", "p95", "in_range")]
+
+
 class CallWorker(QThread):
     """Corre `fn()` fuera del hilo de la UI (cargar/predecir bloquean)."""
 
@@ -82,8 +91,9 @@ class CallWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, specs):
+    def __init__(self, specs, calibration_path=None):
         super().__init__()
+        self.calibration = Calibration(calibration_path)
         self.specs = list(specs)             # [BackendSpec]
         self.backend = None                  # SubprocessBackend o CliBackend conectado
         self.model_loaded = False
@@ -122,6 +132,9 @@ class MainWindow(QMainWindow):
         open_button = QPushButton("Abrir imagen...")
         open_button.clicked.connect(self._on_open_image)
         top.addWidget(open_button)
+        self.calibrate_button = QPushButton("Calibrar...")
+        self.calibrate_button.clicked.connect(self._on_calibrate)
+        top.addWidget(self.calibrate_button)
         self.accept_button = QPushButton("Aceptar y guardar máscara")
         self.accept_button.clicked.connect(self._on_accept)
         self.accept_button.setEnabled(False)
@@ -135,6 +148,7 @@ class MainWindow(QMainWindow):
         top.addStretch()
         top.addWidget(QLabel("Backend:"))
         self.combo_backend = QComboBox()
+        self.combo_backend.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         for spec in self.specs:
             self.combo_backend.addItem(spec.name, spec)
         self.combo_backend.activated.connect(self._on_backend_selected)
@@ -176,6 +190,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(brush)
         brush.addWidget(QLabel("Clase a pintar / asignar:"))
         self.combo_class = QComboBox()
+        self.combo_class.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         brush.addWidget(self.combo_class)
         self.slider_brush, self.label_brush = self._add_size_slider(brush, "Pincel", 10, self._on_brush_size)
         self.slider_eraser, self.label_eraser = self._add_size_slider(brush, "Borrador", 3, self._on_eraser_size)
@@ -210,6 +225,7 @@ class MainWindow(QMainWindow):
         predict.addWidget(self.radio_zone)
         predict.addWidget(QLabel("Magnificación:"))
         self.combo_magnification = QComboBox()
+        self.combo_magnification.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         predict.addWidget(self.combo_magnification)
         self.predict_button = QPushButton("Predecir")
         self.predict_button.clicked.connect(self._on_predict_clicked)
@@ -566,6 +582,19 @@ class MainWindow(QMainWindow):
         self._set_mask(mask)
         self.dirty = True
 
+    # ---------- Calibración ----------
+    def _on_calibrate(self):
+        magnifications = self.backend.info.magnifications if self.backend else ()
+        dialog = CalibrationDialog(self.calibration, magnifications, self)
+        if dialog.exec_() != dialog.Accepted:
+            return
+        try:
+            self.calibration.save()
+        except OSError as exc:
+            QMessageBox.critical(self, "No se pudo guardar la calibración", str(exc))
+        if self.particle is not None:
+            self._refresh_particle()   # se reexpresa en la unidad nueva
+
     # ---------- Análisis de partícula ----------
     def _select_particle(self, x, y):
         """Click con la herramienta Analizar: selecciona la partícula bajo el
@@ -587,9 +616,22 @@ class MainWindow(QMainWindow):
 
     def _refresh_particle(self):
         class_id = int(self.mask[self.particle][0])
-        self.particle_dialog.show_particle(class_id, object_stats(self.particle))
+        reference, counts = self._reference_for(class_id)
+        scale = self.calibration.scale(self.combo_magnification.currentText())
+        self.particle_dialog.show_particle(class_id, object_stats(self.particle), reference, counts, scale)
         self.canvas.highlight = object_contours(self.particle, holes=True)
         self.canvas.update()
+
+    def _reference_for(self, class_id):
+        """Estadística de entrenamiento de la clase (a la magnificación elegida)
+        y la cantidad de objetos de cada clase, si el backend la ofrece."""
+        stats = None if self.busy else self.backend.reference_stats()
+        magnification = self.combo_magnification.currentText()
+        self.particle_dialog.magnification = magnification
+        per_class = (stats or {}).get(magnification) or {}
+        counts = [(c.name, per_class[str(c.id)]["n"])
+                  for c in self.backend.info.classes if str(c.id) in per_class]
+        return per_class.get(str(class_id)), counts
 
     def _clear_particle(self):
         self.particle = None
@@ -681,6 +723,9 @@ class MainWindow(QMainWindow):
         fields = ["image", "backend", "model", "object", "class_id", "class_name",
                   "centroid_x", "centroid_y", "bbox_x", "bbox_y", "bbox_w", "bbox_h",
                   "area_px", "perimeter_px", "equivalent_diameter_px", "circularity"]
+        reference = self._csv_reference()
+        if reference is not None:
+            fields += REFERENCE_FIELDS
         try:
             rows = measure_objects(self.mask)
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -696,6 +741,7 @@ class MainWindow(QMainWindow):
                         "area_px": r["area"], "perimeter_px": f"{r['perimeter']:.2f}",
                         "equivalent_diameter_px": f"{r['equivalent_diameter']:.2f}",
                         "circularity": f"{r['circularity']:.4f}",
+                        **(self._reference_columns(reference, r) if reference is not None else {}),
                     })
             save_mask(mask_path, self.mask, self.palette, mode="ids")
         except OSError as exc:
@@ -703,6 +749,31 @@ class MainWindow(QMainWindow):
             return
         self.status_label.setText(
             f"Exportados {len(rows)} objetos: {csv_path} y {os.path.basename(mask_path)}")
+
+    def _csv_reference(self):
+        """Estadística de entrenamiento de la magnificación elegida, para
+        adjuntarla al CSV (solo si está activado y el backend la ofrece)."""
+        if not self.calibration.csv_stats:
+            return None
+        stats = self.backend.reference_stats() or {}
+        return stats.get(self.combo_magnification.currentText())
+
+    @staticmethod
+    def _reference_columns(reference, row):
+        """Columnas ref_* de un objeto (en píxeles, como el resto del CSV);
+        vacías si el modelo no tiene estadística para su clase."""
+        ref = reference.get(str(row["class_id"]), {})
+        out = {name: "" for name in REFERENCE_FIELDS}
+        if ref:
+            out["ref_n"] = ref.get("n", "")
+        for ref_key, stat_key in REFERENCE_METRICS:
+            r = ref.get(ref_key)
+            if not r:
+                continue
+            for q in ("p5", "mean", "p95"):
+                out[f"ref_{ref_key}_{q}"] = f"{r[q]:.4g}"
+            out[f"ref_{ref_key}_in_range"] = "yes" if r["p5"] <= row[stat_key] <= r["p95"] else "no"
+        return out
 
     def _confirm_discard(self):
         if not self.dirty:

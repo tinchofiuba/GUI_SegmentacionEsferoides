@@ -45,6 +45,7 @@ class BackendInfo:
     magnifications: list
     supports_bbox: bool = True
     accepts_model_path: bool = False  # `load` acepta una ruta de carpeta arbitraria
+    supports_reference_stats: bool = False  # responde `reference_stats`
     protocol: int = PROTOCOL_VERSION
 
     @property
@@ -67,6 +68,7 @@ class BackendInfo:
             magnifications=list(d.get("magnifications", [])),
             supports_bbox=bool(d.get("supports_bbox", True)),
             accepts_model_path=bool(d.get("accepts_model_path", False)),
+            supports_reference_stats=bool(d.get("supports_reference_stats", False)),
         )
 
 
@@ -79,6 +81,7 @@ class SubprocessBackend:
         self._lock = threading.Lock()
         self._next_id = 0
         self._stderr_tail = deque(maxlen=40)
+        self._reference_stats = None   # caché del modelo cargado; None = sin pedir
         self._tmp = tempfile.TemporaryDirectory(prefix="gui_seg_")
         full_env = {**os.environ, **(env or {}), "PYTHONUNBUFFERED": "1"}
         try:
@@ -136,7 +139,21 @@ class SubprocessBackend:
 
     def load_model(self, model_id):
         """Devuelve la descripción del modelo cargado (texto)."""
-        return self._request("load", model=model_id).get("description", model_id)
+        description = self._request("load", model=model_id).get("description", model_id)
+        self._reference_stats = None
+        return description
+
+    def reference_stats(self):
+        """Estadística del set de entrenamiento del modelo cargado (ver
+        docs/protocol.md) o None si el backend no la ofrece."""
+        if not self.info.supports_reference_stats:
+            return None
+        if self._reference_stats is None:
+            try:
+                self._reference_stats = self._request("reference_stats")
+            except BackendError:
+                return None
+        return self._reference_stats
 
     def predict(self, image_path, magnification, bbox=None):
         """Devuelve la máscara (uint8, ids de clase) del recorte `bbox`

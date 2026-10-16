@@ -21,7 +21,11 @@ INFO = {
     ],
     "magnifications": ["4x", "10x"],
     "supports_bbox": True,
+    "supports_reference_stats": True,
 }
+REFERENCE = {"4x": {"2": {"n": 10, "area": {"mean": 1500, "p5": 1000, "p95": 2000},
+                          "circularity": {"mean": 0.9, "p5": 0.8, "p95": 0.95}},
+                    "1": {"n": 30}}}
 loaded = None
 
 
@@ -37,6 +41,8 @@ def handle(req):
             raise ValueError("no existe ese modelo")
         loaded = req["model"]
         return {"description": f"fake:{loaded}"}
+    if cmd == "reference_stats":
+        return REFERENCE
     if cmd == "predict":
         if CRASH:
             sys.exit(3)

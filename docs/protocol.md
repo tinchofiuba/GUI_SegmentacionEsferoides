@@ -27,7 +27,8 @@ Sin parámetros. Se pide una vez al conectar. Resultado:
   ],
   "magnifications": ["4x", "10x"],
   "supports_bbox": true,
-  "accepts_model_path": false
+  "accepts_model_path": false,
+  "supports_reference_stats": true
 }
 ```
 
@@ -61,6 +62,22 @@ Resultado: `{"description": "texto para mostrar"}`.
 
 Todo el procesamiento (padding, normalización, TTA, post-procesado) es
 responsabilidad del backend.
+
+### `reference_stats` (opcional)
+Solo se pide si `info` trae `supports_reference_stats: true`. Sin parámetros.
+Devuelve la estadística de los objetos del set de entrenamiento del modelo
+cargado, por magnificación y por id de clase (como string), o `null` si ese
+modelo no la tiene. La GUI la usa en el análisis de partícula para mostrar si
+una medida cae dentro del intervalo `[p5, p95]`.
+
+```json
+{"10x": {"1": {"n": 212,
+               "area":        {"mean": 40699.9, "p5": 12648.9, "p95": 85515.6},
+               "diameter":    {"mean": 213.5,   "p5": 126.8,   "p95": 330.0},
+               "circularity": {"mean": 0.83,    "p5": 0.53,    "p95": 0.88}}}}
+```
+Las métricas son opcionales (la GUI muestra solo las que vengan); unidades en
+píxeles nativos.
 
 ### `shutdown`
 Responde `ok` y termina el proceso.

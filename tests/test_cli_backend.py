@@ -57,6 +57,18 @@ def test_declares_classes_and_lists_models_latest_loaded(repo):
     b.close()
 
 
+def test_models_glob_accepts_a_list_of_patterns(repo, tmp_path):
+    other = repo / "colab_x" / "checkpoints"
+    other.mkdir(parents=True)
+    (other / "best.msgpack").write_text("x")
+    spec = make_spec(repo)
+    spec.options["models_glob"] = [str(repo / "outputs/runs/*/checkpoints/best.msgpack"),
+                                   str(repo / "colab_*/checkpoints/best.msgpack")]
+    b = create_backend(spec)
+    assert sorted(m.label for m in b.list_models()) == ["colab_x", "run_a", "run_b"]
+    b.close()
+
+
 def test_predict_full_and_crop_have_expected_shapes(repo, image_path):
     b = create_backend(make_spec(repo))
     full = b.predict(image_path, "", None)
