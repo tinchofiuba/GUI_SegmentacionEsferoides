@@ -48,3 +48,20 @@ def test_render_fully_outside_returns_background():
     mask = np.zeros((100, 100), np.uint8)
     out = viewport.render_view(levels, mask, PALETTE, (500.0, 500.0), 1.0, 200, 200)
     assert np.all(out == viewport.BACKGROUND_GRAY)
+
+
+def test_scale_bar_length_is_a_round_number_that_fits_on_screen():
+    assert viewport.scale_bar_length(1.0) == 100           # el ejemplo de siempre: 100 px
+    assert viewport.scale_bar_length(0.5) == 200
+    assert viewport.scale_bar_length(0.3) == 500
+    assert viewport.scale_bar_length(10.0) == 10
+    assert viewport.scale_bar_length(0.001) == 100000
+    for zoom in (0.01, 0.05, 0.2, 0.7, 1.0, 1.5, 3.0, 8.0, 40.0):
+        n = viewport.scale_bar_length(zoom)
+        assert n * zoom <= 160                              # nunca se pasa de ~160 px en pantalla
+        assert n * zoom > 160 / 5                           # y no queda diminuta
+        assert str(n)[0] in "125" and set(str(n)[1:]) <= {"0"}    # 1, 2 o 5 x 10^k
+
+
+def test_scale_bar_length_never_goes_below_one_pixel():
+    assert viewport.scale_bar_length(1000.0) == 1

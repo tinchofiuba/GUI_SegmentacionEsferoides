@@ -123,7 +123,7 @@ modelo exige que se pida explícitamente.
 
 **Hecho en esta sesión (todo sin commitear, 43 tests y ruff en verde):**
 
-- **Herramienta "Analizar partícula (A)"**: click selecciona un objeto (contorno
+- **Herramienta "Analizar objeto (A)"**: click selecciona un objeto (contorno
   magenta de 2 px, también los huecos internos), segundo click lo deselecciona.
   Popup no modal con clase (editable), área, perímetro (solo contorno externo),
   diámetro equivalente y circularidad, en píxeles; botones *Rellenar huecos*,

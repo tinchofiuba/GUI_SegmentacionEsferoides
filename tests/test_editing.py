@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from gui_segesferoides.editing import (
+    count_objects,
     UndoStack,
     fill_holes,
     paint_circle,
@@ -135,3 +136,24 @@ def test_object_contours_include_holes_but_perimeter_is_external_only():
     assert len(object_contours(region)) == 1
     assert len(object_contours(region, holes=True)) == 2
     assert object_stats(region)["perimeter"] == 68.0
+
+
+def test_count_objects_counts_components_per_class_not_pixels():
+    mask = np.zeros((40, 40), np.uint8)
+    mask[2:12, 2:12] = 1            # una célula de 100 px
+    mask[20:23, 2:5] = 1            # otra, de 9 px: cuenta igual
+    mask[2:30, 20:38] = 2           # un esferoide enorme: sigue siendo 1
+    assert count_objects(mask) == {1: 2, 2: 1}
+
+
+def test_count_objects_uses_4_connectivity_like_the_rest_of_the_gui():
+    mask = np.zeros((10, 10), np.uint8)
+    mask[1, 1] = 3
+    mask[2, 2] = 3                  # se tocan solo en diagonal: son dos objetos (igual que en el CSV)
+    assert count_objects(mask) == {3: 2}
+    from gui_segesferoides.editing import measure_objects
+    assert len(measure_objects(mask)) == 2
+
+
+def test_count_objects_of_an_empty_mask():
+    assert count_objects(np.zeros((8, 8), np.uint8)) == {}

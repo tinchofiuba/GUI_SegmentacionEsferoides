@@ -6,13 +6,16 @@ señales; el diálogo no toca la máscara.
 from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +25,7 @@ from gui_segesferoides.calibration import Scale
 # (clave de object_stats, clave de la estadística de referencia, título, tipo)
 METRICS = [
     ("area", "area", "Área", "area"),
+    ("perimeter", "perimeter", "Perímetro", "length"),
     ("equivalent_diameter", "diameter", "Diámetro equivalente", "length"),
     ("circularity", "circularity", "Circularidad", "ratio"),
 ]
@@ -35,6 +39,7 @@ def format_value(kind, value, scale):
         return scale.length(value)
     return f"{value:.2f}"
 INSIDE, OUTSIDE = QColor("#2e9e5b"), QColor("#d9534f")
+SELECTED = QColor("#e8912d")   # intervalo elegido y borde del desplegable de detalle: el mismo color los une
 
 
 class RangeBar(QWidget):
@@ -47,9 +52,16 @@ class RangeBar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(96, 18)
+        self.setMinimumWidth(260)           # se estira con el popup
+        self.setFixedHeight(20)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.value = self.low = self.high = self.mean = None
+        self.selected = False      # su detalle está abierto en el desplegable
+
+    def set_selected(self, selected):
+        self.selected = selected
+        self.update()
 
     def set_data(self, value, low, high, mean, interval_text):
         self.value, self.low, self.high, self.mean = value, low, high, mean
@@ -63,7 +75,7 @@ class RangeBar(QWidget):
     def _scale(self):
         """Rango visible: el intervalo con un margen a cada lado (sin pasar de
         0, ni de 1 si es una razón como la circularidad)."""
-        margin = (self.high - self.low) * 0.6
+        margin = (self.high - self.low) * 0.4      # poco margen: la banda ocupa ~55% de la barra
         lo, hi = max(0.0, self.low - margin), self.high + margin
         if self.high <= 1.0:
             hi = min(hi, 1.0)
@@ -85,6 +97,12 @@ class RangeBar(QWidget):
         def x_of(v):
             return pad + span * min(1.0, max(0.0, (v - lo) / (hi - lo)))
 
+        if self.selected:
+            fill = QColor(SELECTED)
+            fill.setAlpha(45)
+            p.setPen(QPen(SELECTED, 2))
+            p.setBrush(fill)
+            p.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 5, 5)
         track = self.palette().mid().color()
         p.setPen(Qt.NoPen)
         p.setBrush(track)
@@ -102,15 +120,50 @@ class RangeBar(QWidget):
 
 
 class ReferenceDialog(QDialog):
-    """Detalle de una métrica contra el set de entrenamiento: límites,
-    media, valor actual y cuántos objetos hay de cada clase."""
+    """Desplegable con el detalle de una métrica contra el set de entrenamiento:
+    límites, media, valor actual y cuántos objetos hay de cada clase. No es modal:
+    queda al lado del popup de la partícula hasta que se lo cierra (✕, Esc o
+    «Cerrar»), y se actualiza si se elige otro intervalo."""
 
-    def __init__(self, title, value_text, ref, counts, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        layout.addLayout(form)
+    closed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+        self.setModal(False)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame()
+        frame.setObjectName("referenciaMarco")
+        frame.setStyleSheet(f"QFrame#referenciaMarco {{ border: 2px solid {SELECTED.name()};"
+                            f" border-radius: 6px; background: palette(window); }}")
+        outer.addWidget(frame)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 12)
+
+        header = QHBoxLayout()
+        layout.addLayout(header)
+        self.title_label = QLabel()
+        self.title_label.setStyleSheet(f"font-weight: bold; color: {SELECTED.darker(130).name()};")
+        header.addWidget(self.title_label, stretch=1)
+        close_x = QToolButton()
+        close_x.setText("✕")
+        close_x.setAutoRaise(True)
+        close_x.setToolTip("Cerrar (Esc)")
+        close_x.clicked.connect(self.close)
+        header.addWidget(close_x)
+
+        self.form = QFormLayout()
+        layout.addLayout(self.form)
+        self.counts_label = QLabel()
+        layout.addWidget(self.counts_label)
+        close = QPushButton("Cerrar")
+        close.clicked.connect(self.close)
+        layout.addWidget(close)
+
+    def show_reference(self, title, value_text, ref, counts):
+        self.title_label.setText(f"{title}: referencia del entrenamiento")
+        while self.form.rowCount():
+            self.form.removeRow(0)
         fmt = ref["fmt"]
         rows = [
             ("Valor actual", value_text),
@@ -120,13 +173,15 @@ class ReferenceDialog(QDialog):
             (f"Objetos de {ref['class_label']} usados", str(ref["n"])),
         ]
         for label, text in rows:
-            form.addRow(label + ":", QLabel(text))
-        layout.addWidget(QLabel(
+            self.form.addRow(label + ":", QLabel(text))
+        self.counts_label.setText(
             f"<b>Objetos por clase del entrenamiento ({ref['magnification'] or 'todas'}):</b><br>"
-            + "<br>".join(f"{name}: {n}" for name, n in counts)))
-        close = QPushButton("Cerrar")
-        close.clicked.connect(self.accept)
-        layout.addWidget(close)
+            + "<br>".join(f"{name}: {n}" for name, n in counts))
+        self.adjustSize()
+
+    def hideEvent(self, event):
+        self.closed.emit()
+        super().hideEvent(event)
 
 
 class ParticleDialog(QDialog):
@@ -139,6 +194,7 @@ class ParticleDialog(QDialog):
         """`classes`: [(id, nombre)] de las clases que declara el backend."""
         super().__init__(parent, Qt.Tool)
         self.setWindowTitle("Partícula")
+        self.setMinimumWidth(640)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
@@ -153,6 +209,8 @@ class ParticleDialog(QDialog):
         self.scale = Scale()
         self.magnification = ""   # la fija la ventana principal
         self.current_class = None
+        self.reference_panel = None   # desplegable de detalle (se crea al primer click)
+        self._ref_key = None          # métrica cuyo detalle está abierto
         self.reference = None   # estadística de referencia de la clase mostrada
         self._counts = []
         self._current = {}
@@ -165,7 +223,7 @@ class ParticleDialog(QDialog):
             self.bars[key].clicked.connect(lambda k=key: self._show_reference(k))
             self.bars[key].hide()
         form.addRow("Área:", self._with_bar(self.label_area, self.bars["area"]))
-        form.addRow("Perímetro:", self.label_perimeter)   # sin estadística de referencia
+        form.addRow("Perímetro:", self._with_bar(self.label_perimeter, self.bars["perimeter"]))
         form.addRow("Diámetro equivalente:",
                     self._with_bar(self.label_diameter, self.bars["equivalent_diameter"]))
         form.addRow("Circularidad:", self._with_bar(self.label_circularity, self.bars["circularity"]))
@@ -186,9 +244,10 @@ class ParticleDialog(QDialog):
         row = QWidget()
         box = QHBoxLayout(row)
         box.setContentsMargins(0, 0, 0, 0)
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        label.setMinimumWidth(150)             # mismo ancho en todas las filas: las barras quedan alineadas
         box.addWidget(label)
-        box.addWidget(bar)
+        box.addWidget(bar, stretch=1)          # la barra se lleva el ancho que sobra
         return row
 
     def show_particle(self, class_id, stats, reference=None, counts=(), scale=None):
@@ -211,16 +270,75 @@ class ParticleDialog(QDialog):
                 fmt = lambda v, kind=kind: format_value(kind, v, self.scale)
                 self.bars[key].set_data(stats[key], r["p5"], r["p95"], r["mean"],
                                         f"{fmt(r['p5'])} – {fmt(r['p95'])}")
+        panel = self.reference_panel
+        if panel is not None and panel.isVisible():       # otra partícula: se actualiza el detalle abierto
+            ref_key = next((m[1] for m in METRICS if m[0] == self._ref_key), None)
+            if ref_key and (reference or {}).get(ref_key):
+                panel.show_reference(*self._reference_content(self._ref_key))
+                self._place_reference()
+            else:
+                panel.close()
+
+    def _reference_content(self, key):
+        """(título, valor actual, ref, conteos) del detalle de la métrica `key`."""
+        _key, ref_key, title, kind = next(m for m in METRICS if m[0] == key)
+        fmt = lambda v: format_value(kind, v, self.scale)
+        ref = {**self.reference[ref_key], "fmt": fmt, "n": self.reference["n"],
+               "magnification": self.magnification,
+               "class_label": self._class_names.get(self.current_class, str(self.current_class))}
+        return title, fmt(self._current[key]), ref, self._counts
 
     def _show_reference(self, key):
-        _key, ref_key, title, kind = next(m for m in METRICS if m[0] == key)
-        r = self.reference[ref_key]
-        fmt = lambda v: format_value(kind, v, self.scale)
-        ref = {**r, "fmt": fmt, "n": self.reference["n"], "magnification": self.magnification,
-               "class_label": self._class_names.get(self.current_class, str(self.current_class))}
-        ReferenceDialog(f"{title}: referencia del entrenamiento", fmt(self._current[key]),
-                        ref, self._counts, self).exec_()
+        """Abre (o actualiza) el desplegable de detalle de `key`, a la derecha del popup."""
+        if self.reference_panel is None:
+            self.reference_panel = ReferenceDialog(self)
+            self.reference_panel.closed.connect(self._on_reference_closed)
+        self._ref_key = key
+        for k, bar in self.bars.items():
+            bar.set_selected(k == key)
+        self.reference_panel.show_reference(*self._reference_content(key))
+        self.reference_panel.show()
+        self._place_reference(make_room=True)
+        self.reference_panel.raise_()
+
+    def _place_reference(self, make_room=False):
+        """Pega el desplegable al borde derecho del popup. Con `make_room`, si no
+        entra en la pantalla, corre el popup hacia la izquierda lo necesario."""
+        panel = self.reference_panel
+        if panel is None or not panel.isVisible():
+            return
+        gap = 6
+        frame = self.frameGeometry()
+        screen = QApplication.screenAt(frame.center()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        overflow = frame.x() + frame.width() + gap + panel.width() - (avail.x() + avail.width())
+        if make_room and overflow > 0:
+            shift = min(overflow, max(0, frame.x() - avail.x()))
+            self.move(self.x() - shift, self.y())
+            frame = self.frameGeometry()
+        y = min(frame.y(), avail.y() + avail.height() - panel.height())
+        panel.move(frame.x() + frame.width() + gap, max(avail.y(), y))
+
+    def _on_reference_closed(self):
+        self._ref_key = None
+        for bar in self.bars.values():
+            bar.set_selected(False)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._place_reference()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_reference()
+
+    def hideEvent(self, event):
+        if self.reference_panel is not None:
+            self.reference_panel.close()
+        super().hideEvent(event)
 
     def closeEvent(self, event):
+        if self.reference_panel is not None:
+            self.reference_panel.close()
         self.closed.emit()
         super().closeEvent(event)

@@ -22,8 +22,13 @@ INFO = {
     "magnifications": ["4x", "10x"],
     "supports_bbox": True,
     "supports_reference_stats": True,
+    "supports_postprocess": True,
 }
+RULE = {"name": "chicos", "enabled": True, "class": "any", "action": "delete",
+        "conditions": [{"metric": "diameter", "op": "lt", "value": "c1.p5"}]}
+POSTPROCESS = {"rules": [RULE], "fill_holes": [2]}
 REFERENCE = {"4x": {"2": {"n": 10, "area": {"mean": 1500, "p5": 1000, "p95": 2000},
+                          "perimeter": {"mean": 160, "p5": 120, "p95": 200},
                           "circularity": {"mean": 0.9, "p5": 0.8, "p95": 0.95}},
                     "1": {"n": 30}}}
 loaded = None
@@ -41,6 +46,8 @@ def handle(req):
             raise ValueError("no existe ese modelo")
         loaded = req["model"]
         return {"description": f"fake:{loaded}"}
+    if cmd == "get_postprocess":
+        return {**POSTPROCESS, "defaults": POSTPROCESS}
     if cmd == "reference_stats":
         return REFERENCE
     if cmd == "predict":
@@ -54,7 +61,17 @@ def handle(req):
         mask = np.zeros((bh, bw), np.uint8)
         cv2.circle(mask, (bw // 2, bh // 2), max(1, min(bw, bh) // 4), 2, -1)
         cv2.imwrite(req["out"], mask)
-        return {"mask": req["out"]}
+        result = {"mask": req["out"]}
+        if req.get("discarded_out"):   # "descartó" un cuadrado de 6x6 de clase 1 en la esquina
+            discarded = np.zeros((bh, bw), np.uint8)
+            discarded[:6, :6] = 1
+            cv2.imwrite(req["discarded_out"], discarded)
+            result["discarded"] = req["discarded_out"]
+            result["discarded_reasons"] = [{
+                "x": 0, "y": 0, "class": 1, "as_class": 1, "rule": "regla de prueba",
+                "conditions": [{"metric": "diameter", "op": "lt", "value": 10.0,
+                                "reference": "c1.p5", "actual": 6.8}]}]
+        return result
     raise ValueError(f"comando desconocido: {cmd}")
 
 

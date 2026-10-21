@@ -104,6 +104,16 @@ def object_stats(region):
     }
 
 
+def count_objects(mask):
+    """{id de clase: cantidad de objetos} de las clases presentes en `mask`. Un objeto
+    es un componente 4-conexo de una misma clase, igual que en `measure_objects`."""
+    counts = {}
+    for class_id in (int(c) for c in np.unique(mask) if c != 0):
+        n, _ = cv2.connectedComponents((mask == class_id).astype(np.uint8), connectivity=4)
+        counts[class_id] = n - 1
+    return counts
+
+
 def measure_objects(mask):
     """Una fila por objeto (componente 4-conexo de una misma clase), con las
     mismas medidas que el análisis de partícula (`object_stats`) más la clase,

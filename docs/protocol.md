@@ -28,7 +28,8 @@ Sin parámetros. Se pide una vez al conectar. Resultado:
   "magnifications": ["4x", "10x"],
   "supports_bbox": true,
   "accepts_model_path": false,
-  "supports_reference_stats": true
+  "supports_reference_stats": true,
+  "supports_postprocess": true
 }
 ```
 
@@ -59,6 +60,21 @@ Resultado: `{"description": "texto para mostrar"}`.
   imagen completa). La GUI rechaza la respuesta si la forma no coincide o
   aparecen ids no declarados en `info`.
 - Resultado: `{"mask": "<ruta de la máscara escrita>"}`.
+- Opcionales, solo si `info` trae `supports_postprocess: true`:
+  - `postprocess`: `{"rules": [...], "fill_holes": [...]}` (formato de abajo);
+    reemplaza las reglas del modelo **solo en esta petición**. Si falta, el
+    backend usa las del modelo.
+  - `discarded_out`: ruta donde escribir un PNG de 1 canal, del mismo tamaño que
+    la máscara, con el **id de clase original** de lo que las reglas descartaron
+    (0 = nada). El resultado suma `"discarded": "<ruta>"`. La GUI lo muestra
+    como contornos rojos, solo informativo.
+  - `discarded_reasons` (en el resultado, junto con `discarded`): por cada objeto
+    descartado, `{"x", "y"` (un píxel dentro del objeto, en la grilla del PNG),
+    `"class"` (original), `"as_class"` (la que tenía al descartarse, si otra regla
+    lo reclasificó antes), `"rule"` (nombre), `"conditions": [{"metric", "op",
+    "value"` (ya resuelto, en px), `"reference"` (p. ej. `"c1.p5"` o `null`),
+    `"actual"` (lo medido)`}]}`. La GUI lo muestra al pasar el mouse sobre el
+    contorno rojo.
 
 Todo el procesamiento (padding, normalización, TTA, post-procesado) es
 responsabilidad del backend.
@@ -74,10 +90,40 @@ una medida cae dentro del intervalo `[p5, p95]`.
 {"10x": {"1": {"n": 212,
                "area":        {"mean": 40699.9, "p5": 12648.9, "p95": 85515.6},
                "diameter":    {"mean": 213.5,   "p5": 126.8,   "p95": 330.0},
+               "perimeter":   {"mean": 778.8,   "p5": 434.5,   "p95": 1312.0},
                "circularity": {"mean": 0.83,    "p5": 0.53,    "p95": 0.88}}}}
 ```
 Las métricas son opcionales (la GUI muestra solo las que vengan); unidades en
 píxeles nativos.
+
+### `get_postprocess` (opcional)
+Solo si `info` trae `supports_postprocess: true`. Sin parámetros. Devuelve las
+reglas de post-procesado del modelo cargado y las de fábrica:
+`{"rules": [...], "fill_holes": [2, 3], "defaults": {"rules": [...], "fill_holes": [...]}}`.
+La GUI las muestra en un editor y guarda las que el usuario cambie para
+mandarlas en cada `predict`. El backend es el único que las evalúa.
+
+Una regla (se evalúan en orden sobre cada objeto —componente conexo de una
+clase predicha— como una cadena: `reclass` cambia la clase y sigue con las
+reglas siguientes, que ya ven la clase nueva; `delete` y `keep` terminan):
+
+```json
+{"name": "Clase 1 grande y poco circular pasa a clase 2", "enabled": true,
+ "class": 1,
+ "conditions": [{"metric": "diameter",    "op": "gt", "value": "c1.p95"},
+                {"metric": "circularity", "op": "lt", "value": "c1.p5"}],
+ "action": "reclass", "to": 2}
+```
+- `class`: `"any"` o un id de clase.
+- `conditions`: todas deben cumplirse. `metric`: `area`, `diameter`,
+  `circularity` o `perimeter` (en píxeles nativos); `op`: `lt`, `le`, `gt`, `ge`;
+  `value`: número o referencia `"c<id>.<p5|mean|p95>"` a la estadística de
+  entrenamiento de esa clase, de la misma métrica y magnificación.
+- `action`: `delete` (descarta y termina), `reclass` (con `"to"`; cambia la
+  clase y sigue evaluando) o `keep` (lo deja como está y termina: lo protege de
+  las reglas siguientes).
+- Un error de formato se responde como error; una referencia sin estadística
+  hace que esa regla se omita.
 
 ### `shutdown`
 Responde `ok` y termina el proceso.

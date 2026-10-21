@@ -46,6 +46,15 @@ def zoom_at(offset, zoom, new_zoom, anchor_view):
     return ix - ax / new_zoom, iy - ay / new_zoom
 
 
+def scale_bar_length(zoom, max_screen_px=160):
+    """Largo, en píxeles de imagen, de la barra de escala: el mayor "número redondo"
+    (1, 2, 5 x 10^k) que, con este zoom, no pasa de `max_screen_px` en pantalla.
+    Con zoom 1 son 100 px; al acercar o alejar la barra cambia de valor en vez de
+    crecer o encogerse sin límite."""
+    candidates = [m * 10 ** k for k in range(10) for m in (1, 2, 5)]
+    return max((n for n in candidates if n * zoom <= max_screen_px), default=1)
+
+
 def view_to_image(offset, zoom, vx, vy):
     return offset[0] + vx / zoom, offset[1] + vy / zoom
 

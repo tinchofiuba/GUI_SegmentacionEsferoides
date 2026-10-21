@@ -82,6 +82,12 @@ class CliBackend:
     def list_models(self):
         return [ModelEntry(m.id, m.label, m.note, m.id == self.model) for m in self._scan_models()]
 
+    def get_postprocess(self):
+        return None  # el comando externo hace su propio post-procesado
+
+    def predict_with_discarded(self, image_path, magnification, bbox=None, postprocess=None):
+        return self.predict(image_path, magnification, bbox), None, []
+
     def reference_stats(self):
         return None  # el comando externo no expone estadística de entrenamiento
 
