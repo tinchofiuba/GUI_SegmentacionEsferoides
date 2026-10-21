@@ -41,6 +41,7 @@ from gui_segesferoides.editing import (
     count_objects,
     fill_holes,
     fill_object_holes,
+    fill_polygon,
     measure_objects,
     object_contours,
     object_region,
@@ -55,6 +56,7 @@ from gui_segesferoides.image_canvas import (
     TOOL_DELETE,
     TOOL_EDIT_MEASURE,
     TOOL_ERASER,
+    TOOL_LASSO,
     TOOL_MEASURE,
     TOOL_RECLASS,
     TOOL_ZONE,
@@ -70,6 +72,7 @@ from gui_segesferoides.viewport import build_pyramid
 TOOL_LABELS = [
     (TOOL_ZONE, "Zona (Z)"),
     (TOOL_BRUSH, "Pincel (B)"),
+    (TOOL_LASSO, "Lazo (L)"),
     (TOOL_ERASER, "Borrador (E)"),
     (TOOL_DELETE, "Borrar objeto (D)"),
     (TOOL_RECLASS, "Cambiar clase de objeto (R)"),
@@ -313,10 +316,17 @@ class MainWindow(QMainWindow):
         g = QVBoxLayout(group)
         g.setSpacing(1)
         for tool, label in TOOL_LABELS:
-            if tool in (TOOL_BRUSH, TOOL_ERASER, TOOL_DELETE, TOOL_RECLASS):
+            if tool in (TOOL_BRUSH, TOOL_LASSO, TOOL_ERASER, TOOL_DELETE, TOOL_RECLASS):
                 g.addWidget(tool_button(tool, label))
+        self.lasso_hint = QLabel("Marcá puntos con clic (o arrastrá a mano alzada): la curva pasa por "
+                                 "todos. Cerrala con clic sobre el primer punto, doble clic o Enter; "
+                                 "Esc cancela. Se rellena con la clase elegida.")
+        self.lasso_hint.setWordWrap(True)
+        self.lasso_hint.setVisible(False)
+        g.addWidget(self.lasso_hint)
         self.combo_class = QComboBox()
         self.combo_class.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.combo_class.currentIndexChanged.connect(self._update_lasso_color)
         self.row_class = row(QLabel("Clase:"), self.combo_class)
         g.addWidget(self.row_class)
         # Cada tamaño aparece solo con su herramienta.
@@ -352,6 +362,7 @@ class MainWindow(QMainWindow):
         g.addWidget(tool_button(TOOL_EDIT_MEASURE, labels[TOOL_EDIT_MEASURE]))
         self.canvas.measure_color = self.combo_measure_color.currentData()
         self.canvas.measure_clicked.connect(self._on_measure_clicked)
+        self.canvas.lasso_finished.connect(self._on_lasso_finished)
         self.calibrate_button = QPushButton("Calibrar...")
         self.calibrate_button.clicked.connect(self._on_calibrate)
         g.addWidget(self.calibrate_button)
@@ -464,7 +475,7 @@ class MainWindow(QMainWindow):
     def _highlight_active_group(self, tool):
         """Enmarca el grupo al que pertenece la herramienta activa: así se nota con qué
         zona del panel se está trabajando (Predicción: zona; Edición; Análisis)."""
-        owner = {TOOL_ZONE: "Predicción", TOOL_BRUSH: "Edición", TOOL_ERASER: "Edición",
+        owner = {TOOL_ZONE: "Predicción", TOOL_BRUSH: "Edición", TOOL_LASSO: "Edición", TOOL_ERASER: "Edición",
                  TOOL_DELETE: "Edición", TOOL_RECLASS: "Edición", TOOL_ANALYZE: "Análisis",
                  TOOL_MEASURE: "Análisis", TOOL_EDIT_MEASURE: "Análisis"}[tool]
         self.active_group = owner
@@ -489,6 +500,7 @@ class MainWindow(QMainWindow):
         sc("Ctrl+S", self._on_accept)
         sc("Z", lambda: self.radio_zone.setChecked(True))
         sc("B", lambda: self.tool_buttons[TOOL_BRUSH].setChecked(True))
+        sc("L", lambda: self.tool_buttons[TOOL_LASSO].setChecked(True))
         sc("E", lambda: self.tool_buttons[TOOL_ERASER].setChecked(True))
         sc("D", lambda: self.tool_buttons[TOOL_DELETE].setChecked(True))
         sc("R", lambda: self.tool_buttons[TOOL_RECLASS].setChecked(True))
@@ -546,7 +558,8 @@ class MainWindow(QMainWindow):
         if tool != TOOL_ANALYZE:
             self._clear_particle()
         self.canvas.set_tool(tool)
-        self.row_class.setVisible(tool in (TOOL_BRUSH, TOOL_RECLASS))
+        self.row_class.setVisible(tool in (TOOL_BRUSH, TOOL_LASSO, TOOL_RECLASS))
+        self.lasso_hint.setVisible(tool == TOOL_LASSO)
         self.row_brush.setVisible(tool == TOOL_BRUSH)
         self.row_eraser.setVisible(tool == TOOL_ERASER)
         self._highlight_active_group(tool)
@@ -651,7 +664,9 @@ class MainWindow(QMainWindow):
         self.canvas.palette = self.palette
         self.combo_class.clear()
         for c in info.classes:
-            self.combo_class.addItem(f"{c.id} - {c.name}", c.id)
+            icon = _color_icon(info.palette[c.id]) if c.id in info.palette else QIcon()
+            self.combo_class.addItem(icon, f"{c.id} - {c.name}", c.id)   # con el color de la clase
+        self._update_lasso_color()
         self.combo_magnification.clear()
         self.combo_magnification.addItems(info.magnifications)
         self.combo_magnification.setEnabled(bool(info.magnifications))
@@ -800,6 +815,27 @@ class MainWindow(QMainWindow):
 
     def _on_stroke_finished(self):
         self._mark_edited()
+
+    def _update_lasso_color(self, *_):
+        """El lazo se dibuja con el color de la clase que está elegida."""
+        rgb = self.palette.get(self._selected_class())
+        if rgb is not None:
+            self.canvas.lasso_color = tuple(rgb)
+            self.canvas.update()
+
+    def _on_lasso_finished(self, polygon):
+        """El lazo se cerró: el interior pasa a ser un objeto de la clase elegida (pisa lo que
+        hubiera), con un solo paso de deshacer."""
+        if self.mask is None:
+            return
+        self.undo_stack.push(self.mask)
+        if fill_polygon(self.mask, polygon, self._selected_class()):
+            self._mark_edited()
+            self.canvas.update()
+            name = self.combo_class.currentText().split(" - ", 1)[-1]
+            self.status_label.setText(f"Objeto agregado con el lazo: {name}.")
+        else:
+            self.undo_stack.discard_last()                     # no cambió nada: descartar el snapshot
 
     def _on_object_clicked(self, x, y):
         if self.mask is None:

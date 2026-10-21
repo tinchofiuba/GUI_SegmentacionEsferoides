@@ -25,6 +25,22 @@ def paint_segment(mask, x0, y0, x1, y1, radius, class_id):
     cv2.circle(mask, p1, r, int(class_id), thickness=-1)
 
 
+def fill_polygon(mask, polygon, class_id):
+    """Rellena con `class_id` el interior de `polygon` (puntos (N, 2) en coordenadas de
+    imagen), pisando lo que hubiera. Se rasteriza con precisión de subpíxel para que
+    un borde curvo no salga escalonado. Devuelve False si el polígono es demasiado
+    chico para dejar algo (menos de 3 puntos o área menor a 1 px)."""
+    pts = np.asarray(polygon, dtype=float)
+    if len(pts) < 3:
+        return False
+    x, y = pts[:, 0], pts[:, 1]
+    if 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))) < 1.0:
+        return False
+    fixed = np.round(pts * 16).astype(np.int32).reshape(-1, 1, 2)      # 4 bits de subpíxel
+    cv2.fillPoly(mask, [fixed], int(class_id), lineType=cv2.LINE_8, shift=4)
+    return True
+
+
 def replace_object(mask, x, y, new_class):
     """Reasigna a `new_class` (0 = borrar) el objeto conexo bajo (x, y), es
     decir, la región 4-conexa con la misma clase. Devuelve True si cambió algo.

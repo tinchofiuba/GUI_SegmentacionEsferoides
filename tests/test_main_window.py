@@ -18,6 +18,7 @@ from gui_segesferoides.image_canvas import (
     TOOL_DELETE,
     TOOL_EDIT_MEASURE,
     TOOL_ERASER,
+    TOOL_LASSO,
     TOOL_MEASURE,
     TOOL_RECLASS,
     TOOL_ZONE,
@@ -1184,3 +1185,139 @@ def test_status_after_predicting_counts_detections_not_pixels(qapp, window, imag
     assert re.search(rf"{re.escape(cls2)}: 1(,|$)", text)           # exacto: «1», no «17671»
     others = [c.name for c in window.backend.info.classes if c.id != 2]
     assert all(re.search(rf"{re.escape(n)}: 0(,|$)", text) for n in others)
+
+
+# ---------- Lazo ----------
+
+def _image_to_view(window, x, y):
+    from gui_segesferoides import viewport
+    return viewport.image_to_view(window.canvas.offset, window.canvas.zoom, x, y)
+
+
+def _click_image(window, x, y):
+    """Clic del mouse sobre el punto (x, y) de la imagen (pasando por las coordenadas de pantalla)."""
+    vx, vy = _image_to_view(window, x, y)
+    _drag_measure(window, (vx, vy), (vx, vy))
+
+
+def _lasso_triangle(window, points=((60, 40), (160, 50), (110, 140))):
+    for x, y in points:
+        _click_image(window, x, y)
+    _click_image(window, *points[0])                       # clic sobre el primero: cierra
+
+
+def test_lasso_is_a_tool_in_edicion_right_after_the_brush(window):
+    assert window.tool_buttons[TOOL_LASSO].text() == "Lazo (L)"
+    assert _group_title(window.tool_buttons[TOOL_LASSO]) == "Edición"
+    layout = window.tool_buttons[TOOL_BRUSH].parentWidget().layout()
+    assert layout.indexOf(window.tool_buttons[TOOL_LASSO]) == layout.indexOf(window.tool_buttons[TOOL_BRUSH]) + 1
+
+
+def test_lasso_shows_the_class_selector_and_a_hint_but_no_size_sliders(window):
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    assert window.canvas.tool == TOOL_LASSO
+    assert not window.row_class.isHidden() and not window.lasso_hint.isHidden()
+    assert window.row_brush.isHidden() and window.row_eraser.isHidden()
+    window.tool_buttons[TOOL_BRUSH].setChecked(True)
+    assert window.lasso_hint.isHidden() and not window.row_class.isHidden()      # la pista es solo del lazo
+    window.tool_buttons[TOOL_ERASER].setChecked(True)
+    assert window.lasso_hint.isHidden() and window.row_class.isHidden()
+
+
+def test_lasso_hint_explains_how_to_close_it(window):
+    text = window.lasso_hint.text()
+    assert "primer punto" in text and "doble clic" in text and "Enter" in text and "Esc" in text
+
+
+def test_lasso_shortcut_and_group_frame(window):
+    shortcuts = [sc for sc in window.findChildren(QShortcut) if sc.key().toString() == "L"]
+    assert len(shortcuts) == 1
+    shortcuts[0].activated.emit()
+    assert window.canvas.tool == TOOL_LASSO and _framed_groups(window) == ["Edición"]
+    assert _checked_tools(window) == [TOOL_LASSO]
+
+
+def test_closing_a_lasso_adds_an_object_of_the_selected_class(qapp, window, image_path):
+    window.open_image(image_path)
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    window.combo_class.setCurrentIndex(1)
+    class_id = window.combo_class.currentData()
+    _lasso_triangle(window)
+    inside = (110, 80)
+    assert window.mask[inside[1], inside[0]] == class_id
+    assert window.mask[5, 5] == 0 and window.mask[250, 350] == 0
+    assert set(np.unique(window.mask)) == {0, class_id}
+    assert window.dirty and "lazo" in window.status_label.text().lower()
+
+
+def test_the_lasso_object_uses_the_class_chosen_in_the_combo(qapp, window, image_path):
+    window.open_image(image_path)
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    for index in range(window.combo_class.count()):
+        window.mask[:] = 0
+        window.combo_class.setCurrentIndex(index)
+        _lasso_triangle(window)
+        assert window.mask[80, 110] == window.combo_class.itemData(index)
+
+
+def test_a_lasso_replaces_what_was_under_it(qapp, window, image_path):
+    window.open_image(image_path)
+    window.mask[:] = 0
+    window.mask[30:150, 50:170] = window.combo_class.itemData(0)         # un objeto de la primera clase
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    window.combo_class.setCurrentIndex(1)
+    _lasso_triangle(window)
+    assert window.mask[80, 110] == window.combo_class.itemData(1)        # lo de adentro, pisado
+    assert window.mask[35, 55] == window.combo_class.itemData(0)         # lo de afuera del lazo, intacto
+
+
+def test_lasso_is_one_undo_step(qapp, window, image_path):
+    window.open_image(image_path)
+    before = window.mask.copy()
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    _lasso_triangle(window)
+    assert np.any(window.mask)
+    window._undo()
+    assert np.array_equal(window.mask, before)                           # un solo Ctrl+Z lo deshace
+    window._redo()
+    assert np.any(window.mask)
+
+
+def test_a_degenerate_lasso_changes_nothing(qapp, window, image_path):
+    window.open_image(image_path)
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    window._on_lasso_finished(np.array([(10.0, 10.0), (10.2, 10.0), (10.0, 10.2)]))   # menos de 1 px²
+    assert not np.any(window.mask) and not window.dirty
+
+
+def test_lasso_without_an_image_does_nothing(window):
+    window._on_lasso_finished(np.array([(10.0, 10.0), (60.0, 10.0), (35.0, 60.0)]))
+    assert window.mask is None or not np.any(window.mask)
+
+
+def test_class_combo_shows_each_class_color(window):
+    for i in range(window.combo_class.count()):
+        class_id = window.combo_class.itemData(i)
+        icon = window.combo_class.itemIcon(i)
+        assert not icon.isNull()
+        rgb = window.palette[class_id]
+        pixel = icon.pixmap(14, 14).toImage().pixelColor(7, 7)
+        assert (pixel.red(), pixel.green(), pixel.blue()) == tuple(rgb)
+
+
+def test_lasso_preview_uses_the_selected_class_color(window):
+    for i in range(window.combo_class.count()):
+        window.combo_class.setCurrentIndex(i)
+        assert window.canvas.lasso_color == tuple(window.palette[window.combo_class.currentData()])
+
+
+def test_lasso_curve_is_curved_in_the_mask_not_a_straight_edge(qapp, window, image_path):
+    """Marcar las 4 esquinas de un cuadrado deja un objeto redondeado: los lados abultan
+    hacia afuera de la recta que uniría los puntos (con rectas, nada saldría de y=60)."""
+    window.open_image(image_path)
+    window.tool_buttons[TOOL_LASSO].setChecked(True)
+    _lasso_triangle(window, points=((100, 60), (200, 60), (200, 160), (100, 160)))
+    class_id = window.combo_class.currentData()
+    above = np.flatnonzero(window.mask[:60, 150] == class_id)             # por encima del lado superior recto
+    assert len(above) >= 3                                                # abulta al menos 3 px sobre la recta
+    assert window.mask[80, 150] == class_id and window.mask[10, 10] == 0

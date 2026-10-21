@@ -462,3 +462,139 @@ def test_the_label_is_painted_on_screen_where_it_was_moved(qapp):
     image = c.grab().toImage()
     dark = lambda p: image.pixelColor(int(p.x()), int(p.y())).lightness() < 150   # la caja oscura de la etiqueta
     assert dark(moved) and not dark(home)
+
+
+# ---------- Lazo ----------
+
+from PyQt5.QtGui import QKeyEvent  # noqa: E402
+
+from gui_segesferoides.image_canvas import TOOL_LASSO  # noqa: E402
+
+
+@pytest.fixture
+def lasso(canvas):
+    canvas.set_tool(TOOL_LASSO)
+    got = []
+    canvas.lasso_finished.connect(lambda poly: got.append(poly))
+    canvas.finished = got
+    return canvas
+
+
+def _click(canvas, pos):
+    _press(canvas, pos)
+    _release(canvas, pos)
+
+
+def _key(canvas, key):
+    canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+
+
+TRIANGLE = [(20, 20), (80, 20), (50, 80)]
+
+
+def test_clicks_add_points_and_clicking_the_first_one_closes_the_lasso(lasso):
+    for p in TRIANGLE:
+        _click(lasso, p)
+    assert lasso._lasso == [(20.0, 20.0), (80.0, 20.0), (50.0, 80.0)] and lasso.finished == []
+    _click(lasso, (22, 21))                               # cerca del primero (a menos de 12 px)
+    assert len(lasso.finished) == 1 and lasso._lasso == []
+
+
+def test_the_closed_lasso_is_a_smooth_curve_through_the_marked_points(lasso):
+    for p in TRIANGLE:
+        _click(lasso, p)
+    _click(lasso, (20, 20))
+    polygon = lasso.finished[0]
+    assert polygon.ndim == 2 and polygon.shape[1] == 2 and len(polygon) > 3 * 4     # muchos puntos: es una curva
+    for p in TRIANGLE:
+        assert np.min(np.hypot(*(polygon - p).T)) < 1e-6
+
+
+def test_clicking_near_the_first_point_with_fewer_than_three_just_adds_a_point(lasso):
+    _click(lasso, (20, 20))
+    _click(lasso, (80, 20))
+    _click(lasso, (21, 21))                               # cerca del primero, pero aún no hay 3 puntos
+    assert lasso.finished == [] and len(lasso._lasso) == 3
+
+
+def test_double_click_closes_the_lasso(lasso):
+    for p in TRIANGLE:
+        _click(lasso, p)
+    lasso.mouseDoubleClickEvent(QMouseEvent(QEvent.MouseButtonDblClick, QPointF(50, 50), Qt.LeftButton,
+                                            Qt.LeftButton, Qt.NoModifier))
+    assert len(lasso.finished) == 1 and lasso._lasso == []
+
+
+def test_enter_closes_and_escape_cancels(lasso):
+    for p in TRIANGLE:
+        _click(lasso, p)
+    _key(lasso, Qt.Key_Escape)
+    assert lasso.finished == [] and lasso._lasso == []
+    for p in TRIANGLE:
+        _click(lasso, p)
+    _key(lasso, Qt.Key_Return)
+    assert len(lasso.finished) == 1 and lasso._lasso == []
+
+
+def test_a_lasso_with_fewer_than_three_points_leaves_nothing(lasso):
+    _click(lasso, (20, 20))
+    _click(lasso, (80, 20))
+    _key(lasso, Qt.Key_Return)
+    assert lasso.finished == [] and lasso._lasso == []
+
+
+def test_a_microscopic_lasso_is_discarded(lasso):
+    for p in [(20, 20), (21, 20), (20, 21)]:              # área de 0,5 px²
+        _click(lasso, p)
+    _key(lasso, Qt.Key_Return)
+    assert lasso.finished == []
+
+
+def test_dragging_freehand_adds_points_and_returning_to_the_start_closes(lasso):
+    _press(lasso, (50, 20))
+    for pos in [(70, 25), (85, 45), (80, 70), (55, 85), (30, 75), (20, 50), (30, 28), (49, 21)]:
+        _move(lasso, pos)
+    assert len(lasso._lasso) >= 5                         # sumó puntos mientras arrastraba
+    _release(lasso, (49, 21))                             # y soltó sobre el punto de partida
+    assert len(lasso.finished) == 1 and lasso._lasso == []
+
+
+def test_a_freehand_drag_that_does_not_return_keeps_the_lasso_open(lasso):
+    _press(lasso, (20, 20))
+    for pos in [(40, 25), (60, 40), (80, 70)]:
+        _move(lasso, pos)
+    _release(lasso, (80, 70))
+    assert lasso.finished == [] and len(lasso._lasso) >= 3
+
+
+def test_lasso_points_are_clamped_to_the_image(lasso):
+    _click(lasso, (250, 250))                             # sobre el fondo negro
+    assert lasso._lasso == [(99.0, 99.0)]
+
+
+def test_changing_the_tool_cancels_the_lasso(lasso):
+    for p in TRIANGLE:
+        _click(lasso, p)
+    lasso.set_tool(TOOL_BRUSH)
+    assert lasso._lasso == [] and lasso.finished == []
+
+
+def test_opening_another_image_cancels_the_lasso(lasso):
+    _click(lasso, (20, 20))
+    lasso.set_image(build_pyramid(np.zeros((50, 50, 3), np.uint8)), np.zeros((50, 50), np.uint8))
+    assert lasso._lasso == []
+
+
+def test_lasso_preview_paints_without_touching_the_image_data(lasso):
+    before_img, before_mask = lasso.levels[0].copy(), lasso.mask.copy()
+    for p in TRIANGLE:
+        _click(lasso, p)
+    _move(lasso, (60, 60))                                # el punto provisorio de la vista previa
+    assert not lasso.grab().isNull()
+    assert np.array_equal(lasso.levels[0], before_img) and np.array_equal(lasso.mask, before_mask)
+
+
+def test_lasso_uses_a_cross_cursor(lasso):
+    for pos in (INSIDE, OUTSIDE):
+        _move(lasso, pos)
+        assert lasso.cursor().shape() == Qt.CrossCursor

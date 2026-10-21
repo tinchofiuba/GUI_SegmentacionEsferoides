@@ -15,8 +15,12 @@ uv run gui-segesferoides
 ```
 
 - Abrir imagen → elegir backend/modelo → *Predecir* (toda la imagen o una zona).
-- Corregir: pincel (B), borrador (E), borrar objeto (D), cambiar clase de
+- Corregir: pincel (B), lazo (L), borrador (E), borrar objeto (D), cambiar clase de
   objeto (R), rellenar huecos; Ctrl+Z / Ctrl+Y.
+- *Lazo* (L): se marcan puntos con clic (o arrastrando a mano alzada) y la curva
+  pasa suavemente por todos, sin rectas. Se cierra con clic sobre el primer punto,
+  doble clic o Enter (Esc cancela). El interior se rellena como un objeto de la
+  clase elegida en *Clase* (pisa lo que hubiera) y se deshace con un solo Ctrl+Z.
 - Analizar objeto (A): click sobre un objeto lo resalta y abre un popup con
   clase (editable), área, perímetro, diámetro equivalente y circularidad, más
   *Rellenar huecos* y *Eliminar* solo para esa partícula. Click de nuevo sobre
