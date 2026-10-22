@@ -63,6 +63,18 @@ def image_to_view(offset, zoom, ix, iy):
     return (ix - offset[0]) * zoom, (iy - offset[1]) * zoom
 
 
+def blend_mask(region, mask_region, palette, alpha):
+    """Mezcla en `region` (RGB, uint8; se modifica) el color de cada clase de `mask_region`
+    (mismo tamaño) con la transparencia `alpha`. Es lo que se ve en pantalla y lo que se
+    guarda con «Guardar imagen», así que las dos salen iguales."""
+    color = np.zeros_like(region)
+    for cid, rgb in palette.items():
+        color[mask_region == cid] = rgb
+    blended = cv2.addWeighted(region, 1 - alpha, color, alpha, 0)
+    has_class = mask_region > 0
+    region[has_class] = blended[has_class]
+
+
 def render_view(levels, mask, palette, offset, zoom, view_w, view_h, alpha=0.5, show_mask=True):
     """Devuelve un array RGB (view_h, view_w, 3) con la región visible.
     `palette`: {id de clase: (r, g, b)}."""
@@ -98,12 +110,7 @@ def render_view(levels, mask, palette, offset, zoom, view_w, view_h, alpha=0.5, 
 
     if show_mask:
         mcrop = cv2.resize(mask[sy0:sy1, sx0:sx1], (dw, dh), interpolation=cv2.INTER_NEAREST)
-        color = np.zeros_like(region)
-        for cid, rgb in palette.items():
-            color[mcrop == cid] = rgb
-        blended = cv2.addWeighted(region, 1 - alpha, color, alpha, 0)
-        has_class = mcrop > 0
-        region[has_class] = blended[has_class]
+        blend_mask(region, mcrop, palette, alpha)
 
     out[dy0 : dy0 + dh, dx0 : dx0 + dw] = region
     return out

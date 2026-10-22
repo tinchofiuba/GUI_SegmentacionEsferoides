@@ -193,7 +193,7 @@ class ParticleDialog(QDialog):
     def __init__(self, classes, parent=None):
         """`classes`: [(id, nombre)] de las clases que declara el backend."""
         super().__init__(parent, Qt.Tool)
-        self.setWindowTitle("Partícula")
+        self.setWindowTitle("Objeto")
         self.setMinimumWidth(640)
         layout = QVBoxLayout(self)
         form = QFormLayout()

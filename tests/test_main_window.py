@@ -1078,12 +1078,95 @@ def test_save_in_grayscale_without_measures_is_all_gray(colorful, tmp_path):
     assert np.all(img[..., 0] == img[..., 1]) and np.all(img[..., 1] == img[..., 2])
 
 
-def test_save_image_does_not_include_the_mask(colorful, tmp_path):
-    colorful.mask[50:150, 50:150] = 2                                   # una máscara bien visible
+def _saved_rgb(path):
+    return cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+
+
+def _paint_class(window, class_id=2, box=(50, 150, 50, 150)):
+    y0, y1, x0, x1 = box
+    window.mask[y0:y1, x0:x1] = class_id
+
+
+def test_save_image_includes_the_mask_as_shown_on_screen(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(100)                                 # máscara opaca: color exacto de la clase
+    path = str(tmp_path / "conmask.png")
+    colorful.save_image(path)
+    rgb = _saved_rgb(path)
+    assert tuple(rgb[100, 100]) == tuple(colorful.palette[2])           # adentro de la máscara: el color de la clase
+    assert tuple(rgb[10, 10]) == (200, 60, 20)                          # afuera: la imagen intacta
+
+
+def test_save_image_blends_the_mask_with_the_chosen_transparency(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(50)
+    path = str(tmp_path / "mitad.png")
+    colorful.save_image(path)
+    got = _saved_rgb(path)[100, 100].astype(int)
+    expected = np.round(0.5 * np.array((200, 60, 20)) + 0.5 * np.array(colorful.palette[2])).astype(int)
+    assert np.all(np.abs(got - expected) <= 1)                          # mitad imagen, mitad clase
+
+
+def test_save_image_with_zero_transparency_slider_keeps_the_image(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(0)
+    path = str(tmp_path / "alfa0.png")
+    colorful.save_image(path)
+    assert tuple(_saved_rgb(path)[100, 100]) == (200, 60, 20)
+
+
+def test_save_image_follows_the_ver_mascara_checkbox(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(100)
+    colorful.check_show_mask.setChecked(False)                          # «Ver máscara» apagado: se guarda sin ella
     path = str(tmp_path / "sinmask.png")
     colorful.save_image(path)
-    rgb = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-    assert tuple(rgb[100, 100]) == (200, 60, 20)
+    assert tuple(_saved_rgb(path)[100, 100]) == (200, 60, 20)
+    colorful.check_show_mask.setChecked(True)
+    colorful.save_image(path)
+    assert tuple(_saved_rgb(path)[100, 100]) == tuple(colorful.palette[2])
+
+
+def test_save_image_in_grayscale_keeps_the_mask_color_over_a_gray_image(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(100)
+    colorful.combo_save_channels.setCurrentIndex(1)                     # Escala de grises
+    path = str(tmp_path / "gris.png")
+    colorful.save_image(path)
+    rgb = _saved_rgb(path)
+    assert tuple(rgb[100, 100]) == tuple(colorful.palette[2])           # la máscara conserva su color
+    assert rgb[10, 10, 0] == rgb[10, 10, 1] == rgb[10, 10, 2]           # y el fondo está en grises
+
+
+def test_save_image_draws_the_measures_over_the_mask(colorful, tmp_path):
+    _paint_class(colorful)
+    colorful.slider_alpha.setValue(100)
+    colorful.canvas.measures.append(Measure((20.0, 100.0), (280.0, 100.0), BLUE_RGB))
+    path = str(tmp_path / "ambas.png")
+    colorful.save_image(path)
+    rgb = _saved_rgb(path)
+    assert tuple(rgb[100, 100]) == BLUE_RGB                             # la medida, encima de la máscara
+    assert tuple(rgb[70, 100]) == tuple(colorful.palette[2])            # y la máscara, alrededor
+
+
+def test_saved_image_matches_what_the_canvas_shows(colorful, tmp_path):
+    """La mezcla de la máscara es la misma que en pantalla (ver viewport.blend_mask)."""
+    from gui_segesferoides import viewport
+    _paint_class(colorful, 2)
+    _paint_class(colorful, 1, box=(120, 180, 160, 260))
+    colorful.slider_alpha.setValue(40)
+    path = str(tmp_path / "igual.png")
+    colorful.save_image(path)
+    saved = _saved_rgb(path)
+    shown = viewport.render_view(colorful.canvas.levels, colorful.mask, colorful.palette, (0.0, 0.0), 1.0,
+                                 300, 200, alpha=0.4, show_mask=True)
+    assert np.abs(saved.astype(int) - shown.astype(int)).max() <= 1
+
+
+def test_save_image_without_any_mask_is_just_the_image(colorful, tmp_path):
+    path = str(tmp_path / "vacia.png")
+    colorful.save_image(path)
+    assert np.all(_saved_rgb(path) == (200, 60, 20))
 
 
 def test_save_image_dialog_uses_the_format_from_the_combo(qapp, colorful, tmp_path, monkeypatch):

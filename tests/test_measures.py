@@ -168,3 +168,36 @@ def test_render_draws_the_label_where_the_offset_puts_it(qapp):
     dark = lambda out, x, y: out[y, x].sum() < 3 * 150            # la caja de la etiqueta oscurece el fondo
     assert dark(out_home, hx, hy) and not dark(out_home, nx, ny)
     assert dark(out_moved, nx, ny) and not dark(out_moved, hx, hy)  # se fue de su lugar de siempre
+
+
+# ---------- Máscara en la imagen guardada ----------
+
+def test_render_blends_the_mask_with_the_palette_and_alpha(qapp):
+    img = _flat_image(rgb=(100, 100, 100))
+    mask = np.zeros((100, 120), np.uint8)
+    mask[20:60, 30:90] = 2
+    out = render_measures(img, [], Scale(), mask=mask, palette={2: (255, 0, 0)}, alpha=0.5)
+    assert tuple(out[40, 60]) == (178, 50, 50)                         # 0,5·gris + 0,5·rojo
+    assert tuple(out[5, 5]) == (100, 100, 100)                         # fuera de la máscara, intacto
+
+
+def test_render_without_a_mask_ignores_the_palette(qapp):
+    img = _flat_image()
+    assert np.array_equal(render_measures(img, [], Scale(), palette={2: (255, 0, 0)}), img)
+
+
+def test_render_in_grayscale_keeps_the_mask_color(qapp):
+    img = _flat_image(rgb=(200, 60, 20))
+    mask = np.zeros((100, 120), np.uint8)
+    mask[20:60, 30:90] = 1
+    out = render_measures(img, [], Scale(), grayscale=True, mask=mask, palette={1: (0, 200, 0)}, alpha=1.0)
+    assert tuple(out[40, 60]) == (0, 200, 0)
+    assert out[5, 5, 0] == out[5, 5, 1] == out[5, 5, 2]
+
+
+def test_render_draws_measures_above_the_mask(qapp):
+    img = _flat_image()
+    mask = np.ones((100, 120), np.uint8)
+    out = render_measures(img, [Measure((10.0, 50.0), (110.0, 50.0), (0, 90, 255))], Scale(),
+                          mask=mask, palette={1: (255, 0, 0)}, alpha=1.0)
+    assert tuple(out[50, 60]) == (0, 90, 255) and tuple(out[5, 5]) == (255, 0, 0)

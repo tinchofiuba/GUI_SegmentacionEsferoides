@@ -14,6 +14,7 @@ from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPen
 
 from gui_segesferoides.calibration import PX
+from gui_segesferoides.viewport import blend_mask
 
 # (nombre, (r, g, b)): los colores que se pueden elegir para una medida
 MEASURE_COLORS = [
@@ -146,15 +147,19 @@ def draw_measure(painter, a, b, color, width, label, font_px, highlighted=False,
     painter.drawText(box, Qt.AlignCenter, label)
 
 
-def render_measures(image_rgb, measures, scale, grayscale=False):
-    """Copia de la imagen (RGB, uint8) con las medidas dibujadas, a resolución nativa.
-    En escala de grises la imagen pasa a grises pero las medidas conservan su color,
-    así que el resultado sigue teniendo 3 canales."""
+def render_measures(image_rgb, measures, scale, grayscale=False, mask=None, palette=None, alpha=0.5):
+    """Copia de la imagen (RGB, uint8) a resolución nativa, tal como se ve en pantalla: con
+    la máscara (si se pasa `mask`, mezclada con transparencia `alpha` y los colores de
+    `palette`) y encima las medidas dibujadas. En escala de grises la imagen pasa a grises,
+    pero la máscara y las medidas conservan su color, así que el resultado sigue teniendo
+    3 canales."""
     base = image_rgb
     if grayscale:
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
         base = np.stack([gray] * 3, axis=-1)
     out = np.ascontiguousarray(base.copy())
+    if mask is not None and palette:
+        blend_mask(out, mask, palette, alpha)
     if not measures:
         return out
     h, w = out.shape[:2]

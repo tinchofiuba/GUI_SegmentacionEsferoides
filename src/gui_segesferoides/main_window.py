@@ -383,7 +383,8 @@ class MainWindow(QMainWindow):
         g.addWidget(row(QLabel("Transparencia:"), self.slider_alpha))
         # Guardar la imagen de esta vista (solo esta imagen; la máscara se exporta aparte, en .png).
         self.save_image_button = QPushButton("Guardar imagen")
-        self.save_image_button.setToolTip("Guarda la imagen con las medidas trazadas, a resolución nativa")
+        self.save_image_button.setToolTip("Guarda la imagen como se ve, a resolución nativa: con la máscara "
+                                          "(si «Ver máscara» está marcado) y las medidas")
         self.save_image_button.clicked.connect(self._on_save_image)
         self.combo_save_format = QComboBox()
         for name, ext in SAVE_FORMATS:
@@ -446,12 +447,16 @@ class MainWindow(QMainWindow):
         self.save_image(path)
 
     def save_image(self, path):
-        """Guarda la imagen a resolución nativa, con las medidas dibujadas (con sus colores y
-        distancias). En escala de grises la imagen pasa a grises, pero las medidas conservan
-        su color. No incluye la máscara. El formato sale de la extensión de `path`."""
+        """Guarda la imagen a resolución nativa, como se ve en pantalla: con la máscara (si «Ver
+        máscara» está marcado, con la transparencia elegida) y las medidas dibujadas, con sus
+        colores y distancias. En escala de grises la imagen pasa a grises, pero la máscara y
+        las medidas conservan su color. El formato sale de la extensión de `path`."""
         scale = self.calibration.scale(self.combo_magnification.currentText())
         gray = self.combo_save_channels.currentData() == "gray"
-        out = render_measures(self.full_res_image, self.canvas.measures, scale, grayscale=gray)
+        show_mask = self.check_show_mask.isChecked()
+        out = render_measures(self.full_res_image, self.canvas.measures, scale, grayscale=gray,
+                              mask=self.mask if show_mask else None, palette=self.palette,
+                              alpha=self.slider_alpha.value() / 100)
         if not cv2.imwrite(path, cv2.cvtColor(out, cv2.COLOR_RGB2BGR)):
             QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar la imagen:\n{path}")
             return False

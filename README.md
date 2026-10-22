@@ -31,9 +31,10 @@ uv run gui-segesferoides
   color* y *Mover*: arrastrar desde la etiqueta mueve solo la etiqueta; desde
   cualquier otro lado mueve toda la medida (conserva largo, orientación y color). Las medidas son
   anotaciones: no tocan la máscara ni lo que se le manda al modelo.
-- *Guardar imagen* (en Vista): guarda la imagen a resolución nativa con las medidas
-  dibujadas, en PNG, JPEG, TIFF o BMP, a color o en escala de grises (las medidas
-  conservan su color). No incluye la máscara.
+- *Guardar imagen* (en Vista): guarda la imagen a resolución nativa, como se ve:
+  con la máscara (si *Ver máscara* está marcado, con la transparencia elegida) y las
+  medidas dibujadas, en PNG, JPEG, TIFF o BMP, a color o en escala de grises (la
+  máscara y las medidas conservan su color).
 - Rueda = zoom, botón derecho/central = mover, `[` `]` = tamaño de la
   herramienta, F = ajustar, M = ver/ocultar máscara, 1-9 = clase.
 - *Aceptar* (Ctrl+S) guarda `<imagen>-Mask.png`: PNG de 1 canal con el id de
