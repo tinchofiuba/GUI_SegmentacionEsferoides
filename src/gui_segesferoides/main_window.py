@@ -65,6 +65,7 @@ from gui_segesferoides.image_canvas import (
 from gui_segesferoides.measures import MEASURE_COLORS, render_measures
 from gui_segesferoides.installer import can_install, is_installed, plan, run_install
 from gui_segesferoides.particle_dialog import SELECTED, ParticleDialog
+from gui_segesferoides.dataset_stats import DatasetStats
 from gui_segesferoides.postprocess_dialog import PostprocessDialog
 from gui_segesferoides.postprocess_store import PostprocessStore
 from gui_segesferoides.viewport import build_pyramid
@@ -120,10 +121,11 @@ class CallWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, specs, calibration_path=None, postprocess_path=None):
+    def __init__(self, specs, calibration_path=None, postprocess_path=None, stats_path=None):
         super().__init__()
         self.calibration = Calibration(calibration_path)
         self.postprocess_store = PostprocessStore(postprocess_path)
+        self.dataset_stats = DatasetStats(stats_path)
         self.discarded = None       # uint8 (como la máscara): clase original de lo que descartaron las reglas
         self.discarded_reasons = []  # [{x, y, rule, conditions...}] en coords de imagen (ver protocol.md)
         self.discarded_labels = None  # int32: id de objeto descartado por píxel (0 = nada)
@@ -1281,7 +1283,7 @@ class MainWindow(QMainWindow):
 
         def open_editor(rules):
             config = self.postprocess_store.get(backend.info.name) or rules
-            dialog = PostprocessDialog(config, rules["defaults"], names, self)
+            dialog = PostprocessDialog(config, rules["defaults"], names, self, self.dataset_stats, backend.info.palette)
             if dialog.exec_() != dialog.Accepted:
                 return
             edited = dialog.config()

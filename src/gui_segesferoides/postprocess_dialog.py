@@ -25,9 +25,12 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QVBoxLayout,
 )
+
+from gui_segesferoides.stats_dialog import StatsDialog
 
 METRICS = [("area", "Área (px²)"), ("diameter", "Diámetro equiv. (px)"),
            ("circularity", "Circularidad"), ("perimeter", "Perímetro (px)")]
@@ -45,13 +48,16 @@ def _combo(options, current):
 
 
 class PostprocessDialog(QDialog):
-    def __init__(self, config, defaults, classes, parent=None):
-        """`config`/`defaults`: {"rules": [...], "fill_holes": [...]}; `classes`: [(id, nombre)]."""
+    def __init__(self, config, defaults, classes, parent=None, stats_store=None, palette=None):
+        """`config`/`defaults`: {"rules": [...], "fill_holes": [...]}; `classes`: [(id, nombre)];
+        `stats_store`: DatasetStats para "Ver estadística" (None = botón deshabilitado)."""
         super().__init__(parent)
         self.setWindowTitle("Reglas de post-procesado")
         self.resize(820, 460)
         self._defaults = copy.deepcopy(defaults)
         self._classes = list(classes)
+        self._stats_store = stats_store
+        self._palette = palette
         self._rules = copy.deepcopy(config["rules"])
         self._row = -1
         self._refs = [f"c{cid}.{q}" for cid, _ in self._classes for q in ("p5", "mean", "p95")]
@@ -118,14 +124,23 @@ class PostprocessDialog(QDialog):
             holes.addWidget(box)
             self.check_holes[cid] = box
         holes.addStretch()
+
+        bottom = QHBoxLayout()
+        outer.addLayout(bottom)
+        bottom.addStretch()
+        self.button_stats = QPushButton("Ver estadística")
+        self.button_stats.clicked.connect(self._show_stats)
+        self.button_stats.setEnabled(stats_store is not None)
+        bottom.addWidget(self.button_stats)
         restore = QPushButton("Restaurar valores de fábrica")
         restore.clicked.connect(self._restore)
-        holes.addWidget(restore)
-
+        bottom.addWidget(restore)
+        bottom.addSpacing(24)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        buttons.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)   # si no, se estira y aleja a los otros dos
+        bottom.addWidget(buttons)
         self._fill_list()
 
     # ---------- lista de reglas ----------
@@ -237,6 +252,9 @@ class PostprocessDialog(QDialog):
         for cid, box in self.check_holes.items():
             box.setChecked(cid in self._defaults.get("fill_holes", []))
         self._fill_list()
+
+    def _show_stats(self):
+        StatsDialog(self._stats_store, self._classes, self._palette, parent=self).exec_()
 
     def _sync_enabled(self):
         for i, rule in enumerate(self._rules):
