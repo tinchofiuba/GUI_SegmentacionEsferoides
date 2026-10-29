@@ -1187,7 +1187,7 @@ class MainWindow(QMainWindow):
 
         found = count_objects(pred)             # cantidad de detecciones por clase, no de píxeles
         counts = ", ".join(f"{c.name}: {found.get(c.id, 0)}" for c in self.backend.info.classes)
-        self.status_label.setText(f"Listo. Corregí lo que haga falta y aceptá. Detecciones — {counts}")
+        self.status_label.setText(f"Segmentación finalizada. — {counts}")
 
     def _store_discarded(self, discarded, bbox, reasons=()):
         """Guarda lo que las reglas descartaron (a tamaño de imagen; con zona, solo
