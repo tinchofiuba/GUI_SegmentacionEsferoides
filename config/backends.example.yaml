@@ -47,3 +47,10 @@ backends:
     classes:                      # fondo / célula suelta / agregado (class_mapping de configs/base.yaml)
       - {id: 1, name: células sueltas, color: [0, 255, 0]}
       - {id: 2, name: agregados,       color: [255, 255, 0]}
+
+  # YOLOv8-seg exportado a .onnx, corre dentro de la GUI (sin proceso aparte).
+  # Las clases salen de la metadata del .onnx (ids 1..n); sin reglas de post-procesado.
+  - name: yolo
+    type: onnx
+    models_glob:
+      - "~/repos/imageprocessingcylinder/GUI_yolo/controllers/video/yolo/modelos/modelos entrenados/yolov8/segmentacion/*/*/outputs/train/weights/exportados/best.onnx"

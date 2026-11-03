@@ -16,6 +16,8 @@ import subprocess
 def is_installed(spec):
     """Hay carpeta (si el backend declara `cwd`) y existe el ejecutable del
     comando: relativo a `cwd` si lleva barra, o en el PATH si no."""
+    if spec.type == "onnx":
+        return True   # corre dentro de la GUI: no hay nada que instalar
     if spec.cwd and not os.path.isdir(spec.cwd):
         return False
     exe = spec.command[0]
