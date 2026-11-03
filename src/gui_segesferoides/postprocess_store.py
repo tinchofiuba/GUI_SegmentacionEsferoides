@@ -1,12 +1,12 @@
-"""Reglas de post-procesado que el usuario editó, por backend. Se guardan en
-~/.config/gui_segesferoides/postprocess.json y se mandan al backend en cada
-predicción; si un backend no tiene entrada, usa las reglas de su modelo.
-Sin Qt.
+"""Reglas de post-procesado que el usuario editó. Son de la GUI, no de un modelo:
+valen para cualquier backend y se guardan en ~/.config/gui_segesferoides/postprocess.json.
+Sin entrada, se usan las de fábrica (postprocess.DEFAULT_POSTPROCESS). Sin Qt.
 """
 
 import json
 import os
 
+from gui_segesferoides import postprocess
 from gui_segesferoides.calibration import default_path as calibration_path
 
 
@@ -17,24 +17,33 @@ def default_path():
 class PostprocessStore:
     def __init__(self, path=None):
         self.path = path or default_path()
-        self.configs = {}      # {nombre de backend: {"rules": [...], "fill_holes": [...]}}
+        self.config = None      # {"rules": [...], "fill_holes": [...]} editado por el usuario
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.configs = {k: v for k, v in data.items()
-                            if isinstance(v, dict) and isinstance(v.get("rules"), list)}
+            if "rules" not in data:    # formato viejo: un dict por backend; se queda con la primera edición válida
+                data = next((v for v in data.values() if self._valid(v)), {})
+            postprocess.validate(data)
+            self.config = {"rules": data["rules"], "fill_holes": data.get("fill_holes", [])}
         except (OSError, ValueError, AttributeError):
-            pass   # sin archivo o dañado: reglas del modelo
+            pass
 
-    def get(self, backend):
-        return self.configs.get(backend)
+    @staticmethod
+    def _valid(config):
+        try:
+            postprocess.validate(config)
+        except ValueError:
+            return False
+        return True
 
-    def set(self, backend, config):
-        """`config` None borra la edición del usuario (vuelve a las reglas del modelo)."""
-        if config is None:
-            self.configs.pop(backend, None)
-        else:
-            self.configs[backend] = {"rules": config["rules"], "fill_holes": config.get("fill_holes", [])}
+    def get(self):
+        """Las reglas vigentes: las del usuario o, sin ellas, las de fábrica."""
+        return self.config or postprocess.defaults()
+
+    def set(self, config):
+        """`config` None borra la edición del usuario (vuelve a las de fábrica)."""
+        self.config = None if config is None else {"rules": config["rules"],
+                                                   "fill_holes": config.get("fill_holes", [])}
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.configs, f, indent=2, ensure_ascii=False)
+            json.dump(self.config or {}, f, indent=2, ensure_ascii=False)

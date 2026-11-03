@@ -1,6 +1,5 @@
-"""Editor de las reglas de post-procesado que expone el backend (ver
-docs/protocol.md, `get_postprocess`). Solo UI: edita una copia del dict de
-reglas y la devuelve con `config()`; la GUI no las evalúa.
+"""Editor de las reglas de post-procesado (ver postprocess.py). Solo UI: edita
+una copia del dict de reglas y la devuelve con `config()`.
 
 Una regla: clase a la que aplica + condiciones (todas deben cumplirse) +
 acción. Se evalúan en orden: reclasificar sigue con las reglas siguientes;
@@ -8,7 +7,6 @@ descartar y conservar terminan.
 """
 
 import copy
-import re
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -30,13 +28,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
+from gui_segesferoides.postprocess import REFERENCE
 from gui_segesferoides.stats_dialog import StatsDialog
 
 METRICS = [("area", "Área (px²)"), ("diameter", "Diámetro equiv. (px)"),
            ("circularity", "Circularidad"), ("perimeter", "Perímetro (px)")]
 OPS = [("lt", "<"), ("le", "≤"), ("gt", ">"), ("ge", "≥")]
 ACTIONS = [("delete", "Descartar"), ("reclass", "Pasar a la clase"), ("keep", "Conservar (termina)")]
-REFERENCE = re.compile(r"c\d+\.(p5|mean|p95)")
 
 
 def _combo(options, current):
@@ -66,7 +64,7 @@ class PostprocessDialog(QDialog):
         outer.addWidget(QLabel("Se evalúan en orden sobre cada objeto predicho. \"Pasar a la clase\" sigue con "
                                "las reglas siguientes (que ya ven la clase nueva); \"Descartar\" y "
                                "\"Conservar\" terminan. Los valores son números en píxeles o una referencia a la "
-                               "estadística del entrenamiento (p. ej. c1.p5)."))
+                               "estadística del dataset (p. ej. c1.p5)."))
         body = QHBoxLayout()
         outer.addLayout(body, stretch=1)
 

@@ -82,3 +82,13 @@ def test_postprocess_dialog_button_order(qapp, tmp_path):
     assert left(d.button_stats) < left(restore) < left(cancel)
     assert left(cancel) - (left(restore) + restore.width()) >= 12   # separado de Cancelar
     assert not PostprocessDialog(base, base, [(1, "chicas")]).button_stats.isEnabled()
+
+
+def test_import_from_a_training_config(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("inference:\n  empirical_thresholds:\n    4x:\n      c1_min: 3.0\n      c1:\n        n: 5\n"
+                    "        area: {mean: 1.0, p5: 0.5, p95: 2.0}\n    10x:\n      c1_min: 1.0\n")
+    data = dataset_stats.from_config_yaml(str(path))
+    assert data["stats"] == {"4x": {"1": {"n": 5, "area": {"mean": 1.0, "p5": 0.5, "p95": 2.0}}}}
+    path.write_text("inference:\n  empirical_thresholds:\n    4x:\n      c1_min: 3.0\n")   # formato viejo
+    assert dataset_stats.from_config_yaml(str(path)) is None

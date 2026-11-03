@@ -18,9 +18,10 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+import yaml
 
 from gui_segesferoides.calibration import default_path as calibration_path
-from gui_segesferoides.editing import measure_objects
+from gui_segesferoides.postprocess import objects_by_class
 
 VERSION = 1
 METRICS = [("area", "Área (px²)"), ("diameter", "Diámetro equiv. (px)"),
@@ -74,19 +75,34 @@ def _summary(values):
 
 
 def summarize(objects):
-    """`objects`: {magnificación: {id de clase: [filas de measure_objects]}} ->
-    {magnificación: {"id": {"n", "area", "diameter", "perimeter", "circularity"}}}.
-    Las clases sin objetos no aparecen (no se extrapola entre magnificaciones)."""
+    """`objects`: {magnificación: {id de clase: [medidas de cada objeto]}} (las de
+    `postprocess.objects_by_class`) -> {magnificación: {"id": {"n", "area",
+    "diameter", "perimeter", "circularity"}}}. Las clases sin objetos no aparecen
+    (no se extrapola entre magnificaciones)."""
     out = {}
     for mag, per_class in objects.items():
         for class_id, rows in per_class.items():
-            if not rows:
-                continue
-            column = {"area": "area", "diameter": "equivalent_diameter",
-                      "perimeter": "perimeter", "circularity": "circularity"}
-            out.setdefault(mag, {})[str(class_id)] = {
-                "n": len(rows), **{k: _summary([r[v] for r in rows]) for k, v in column.items()}}
+            if rows:
+                out.setdefault(mag, {})[str(class_id)] = {
+                    "n": len(rows), **{k: _summary([r[k] for r in rows]) for k, _ in METRICS}}
     return out
+
+
+def from_config_yaml(path):
+    """Estadística guardada en el `config.yaml` de un entrenamiento del repo del modelo
+    (`inference.empirical_thresholds`: {"4x": {"c1": {...}}}) con el formato del archivo
+    de la GUI. None si ese config no la trae (o está en el formato viejo c1_min/c1_max)."""
+    with open(path, encoding="utf-8") as f:
+        thresholds = (yaml.safe_load(f) or {}).get("inference", {}).get("empirical_thresholds")
+    stats = {}
+    for mag, per_class in (thresholds or {}).items():
+        for key, value in per_class.items():
+            if re.fullmatch(r"c\d+", key) and isinstance(value, dict) and "area" in value:
+                stats.setdefault(mag, {})[key[1:]] = value
+    if not stats:
+        return None
+    return {"version": VERSION, "updated": datetime.now().isoformat(timespec="seconds"),
+            "n_images": None, "source": os.path.abspath(path), "stats": stats}
 
 
 def compute(image_paths, palette=None, progress=None):
@@ -108,8 +124,8 @@ def compute(image_paths, palette=None, progress=None):
             skipped.append((image, "máscara ilegible o a color sin paleta"))
         else:
             used += 1
-            for row in measure_objects(mask):
-                objects.setdefault(mag, {}).setdefault(row["class_id"], []).append(row)
+            for class_id, rows in objects_by_class(mask).items():
+                objects.setdefault(mag, {}).setdefault(class_id, []).extend(rows)
     data = {"version": VERSION, "updated": datetime.now().isoformat(timespec="seconds"),
             "n_images": used, "stats": summarize(objects)}
     return data, skipped

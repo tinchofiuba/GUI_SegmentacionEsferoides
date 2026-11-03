@@ -45,8 +45,7 @@ class BackendInfo:
     magnifications: list
     supports_bbox: bool = True
     accepts_model_path: bool = False  # `load` acepta una ruta de carpeta arbitraria
-    supports_reference_stats: bool = False  # responde `reference_stats`
-    supports_postprocess: bool = False  # expone reglas de post-procesado (`get_postprocess`)
+    supports_postprocess: bool = False  # legado: el backend post-procesa solo; se le pide la máscara cruda
     protocol: int = PROTOCOL_VERSION
 
     @property
@@ -69,7 +68,6 @@ class BackendInfo:
             magnifications=list(d.get("magnifications", [])),
             supports_bbox=bool(d.get("supports_bbox", True)),
             accepts_model_path=bool(d.get("accepts_model_path", False)),
-            supports_reference_stats=bool(d.get("supports_reference_stats", False)),
             supports_postprocess=bool(d.get("supports_postprocess", False)),
         )
 
@@ -83,8 +81,6 @@ class SubprocessBackend:
         self._lock = threading.Lock()
         self._next_id = 0
         self._stderr_tail = deque(maxlen=40)
-        self._reference_stats = None   # caché del modelo cargado; None = sin pedir
-        self._postprocess = None       # idem, reglas de post-procesado
         self._tmp = tempfile.TemporaryDirectory(prefix="gui_seg_")
         full_env = {**os.environ, **(env or {}), "PYTHONUNBUFFERED": "1"}
         try:
@@ -142,49 +138,16 @@ class SubprocessBackend:
 
     def load_model(self, model_id):
         """Devuelve la descripción del modelo cargado (texto)."""
-        description = self._request("load", model=model_id).get("description", model_id)
-        self._reference_stats = self._postprocess = None
-        return description
+        return self._request("load", model=model_id).get("description", model_id)
 
-    def get_postprocess(self):
-        """Reglas de post-procesado del modelo cargado: {"rules", "fill_holes",
-        "defaults"} (ver docs/protocol.md), o None si el backend no las expone."""
-        if not self.info.supports_postprocess:
-            return None
-        if self._postprocess is None:
-            self._postprocess = self._request("get_postprocess")
-        return self._postprocess
-
-    def reference_stats(self):
-        """Estadística del set de entrenamiento del modelo cargado (ver
-        docs/protocol.md) o None si el backend no la ofrece."""
-        if not self.info.supports_reference_stats:
-            return None
-        if self._reference_stats is None:
-            try:
-                self._reference_stats = self._request("reference_stats")
-            except BackendError:
-                return None
-        return self._reference_stats
-
-    def predict(self, image_path, magnification, bbox=None, postprocess=None):
-        """Devuelve la máscara (uint8, ids de clase) del recorte `bbox`
-        (x, y, w, h en píxeles nativos) o de la imagen completa. `postprocess`
-        ({"rules", "fill_holes"}) reemplaza las reglas del modelo en esta llamada."""
-        return self.predict_with_discarded(image_path, magnification, bbox, postprocess)[0]
-
-    def predict_with_discarded(self, image_path, magnification, bbox=None, postprocess=None):
-        """Como `predict`, pero devuelve (máscara, descartados, motivos): `descartados`
-        es la clase original de lo que las reglas quitaron (0 = nada), o None si el
-        backend no informa descartados; `motivos` es la lista `discarded_reasons`
-        del protocolo (regla y medidas de cada objeto descartado; [] si no vino)."""
+    def predict(self, image_path, magnification, bbox=None):
+        """Devuelve la máscara cruda (uint8, ids de clase) del recorte `bbox`
+        (x, y, w, h en píxeles nativos) o de la imagen completa. El post-procesado
+        lo hace la GUI (postprocess.py)."""
         out = os.path.join(self._tmp.name, "pred.png")
         params = {}
         if self.info.supports_postprocess:
-            discarded_out = os.path.join(self._tmp.name, "discarded.png")
-            params["discarded_out"] = discarded_out
-            if postprocess is not None:
-                params["postprocess"] = postprocess
+            params["postprocess"] = {"rules": [], "fill_holes": []}   # sin reglas: máscara cruda
         result = self._request(
             "predict",
             image=os.path.abspath(image_path),
@@ -196,13 +159,7 @@ class SubprocessBackend:
         mask = cv2.imread(result["mask"], cv2.IMREAD_UNCHANGED)
         if mask is None or mask.ndim != 2:
             raise BackendError("El backend devolvió una máscara ilegible (se espera PNG de 1 canal)")
-        discarded = None
-        if result.get("discarded"):
-            discarded = cv2.imread(result["discarded"], cv2.IMREAD_UNCHANGED)
-            if discarded is None or discarded.shape != mask.shape:
-                raise BackendError("El backend devolvió descartados ilegibles o de otro tamaño")
-            discarded = discarded.astype(np.uint8)
-        return mask.astype(np.uint8), discarded, list(result.get("discarded_reasons") or [])
+        return mask.astype(np.uint8)
 
     def close(self):
         if self._proc.poll() is None:

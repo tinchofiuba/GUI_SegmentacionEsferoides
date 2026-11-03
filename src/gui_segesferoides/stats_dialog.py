@@ -70,8 +70,9 @@ class StatsDialog(QDialog):
             self.label_info.setText("Todavía no hay estadística. Usá \"Recalcular...\" para generarla desde "
                                     "imágenes con máscara.")
             return
-        self.label_info.setText(f"Calculada con {data['n_images']} imágenes ({data['updated']}). "
-                                "Unidades: píxeles nativos.")
+        origin = (f"Calculada con {data['n_images']} imágenes" if data.get("n_images")
+                  else f"Importada de {data.get('source', 'un config.yaml')}")
+        self.label_info.setText(f"{origin} ({data['updated']}). Unidades: píxeles nativos.")
         for mag in sorted(data["stats"], key=lambda m: int(m[:-1])):
             per_class = data["stats"][mag]
             table = QTableWidget(0, len(COLUMNS))
