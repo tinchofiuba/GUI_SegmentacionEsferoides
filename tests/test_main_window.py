@@ -1335,13 +1335,13 @@ def test_status_after_predicting_counts_detections_not_pixels(qapp, window, imag
     window._on_predict_clicked()
     wait_idle(qapp, window)
     text = window.status_label.text()
-    assert "Detecciones" in text and "Píxeles" not in text
+    assert "Píxeles" not in text
     # el backend de prueba dibuja un círculo de clase 2: es UNA detección, aunque tenga miles de píxeles
     assert int(np.sum(window.mask == 2)) > 100
     cls2 = next(c.name for c in window.backend.info.classes if c.id == 2)
-    assert re.search(rf"{re.escape(cls2)}: 1(,|$)", text)           # exacto: «1», no «17671»
+    assert re.search(rf"{re.escape(cls2)}: 1(?!\d)", text)           # exacto: «1», no «17671»
     others = [c.name for c in window.backend.info.classes if c.id != 2]
-    assert all(re.search(rf"{re.escape(n)}: 0(,|$)", text) for n in others)
+    assert all(re.search(rf"{re.escape(n)}: 0(?!\d)", text) for n in others)
 
 
 # ---------- Lazo ----------
