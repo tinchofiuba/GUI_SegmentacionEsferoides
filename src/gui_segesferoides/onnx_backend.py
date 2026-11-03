@@ -19,7 +19,9 @@ import os
 import cv2
 import numpy as np
 
+from gui_segesferoides import semantic
 from gui_segesferoides.backend import BackendError, BackendInfo, ClassInfo, ModelEntry
+from gui_segesferoides.model_manifest import load_manifest
 
 DEFAULT_COLORS = [(0, 255, 0), (255, 255, 0), (255, 0, 255), (0, 255, 255), (255, 128, 0)]
 GENERIC_DIRS = {"exportados", "weights", "train", "outputs"}   # carpetas que no dicen qué modelo es
@@ -112,10 +114,12 @@ class OnnxBackend:
         self.model = None
         self._session = None
         self._meta = {}
+        self._manifest = None
         declared = o.get("classes")
+        self._declared = [ClassInfo(int(c["id"]), c["name"], tuple(c["color"])) for c in declared or []]
         self.info = BackendInfo(
             name=spec.name,
-            classes=[ClassInfo(int(c["id"]), c["name"], tuple(c["color"])) for c in declared or []],
+            classes=list(self._declared),
             magnifications=[],
             supports_bbox=True,
         )
@@ -146,17 +150,38 @@ class OnnxBackend:
             session = ort.InferenceSession(model_id, providers=ort.get_available_providers())
         except Exception as exc:  # noqa: BLE001 - onnxruntime lanza tipos propios
             raise BackendError(f"No se pudo abrir {model_id}: {exc}") from exc
+        manifest = load_manifest(model_id)
+        if manifest is not None:
+            self._check_semantic(session, manifest, model_id)
+            self.info.classes = list(manifest.classes)
+            self.info.magnifications = list(manifest.magnifications)
+            self._session, self._meta, self._manifest, self.model = session, {}, manifest, model_id
+            return manifest.name or _label(model_id)
         meta = session.get_modelmeta().custom_metadata_map
         if meta.get("task") != "segment" or len(session.get_outputs()) != 2:
             raise BackendError(f"{model_id} no parece un YOLO-seg de Ultralytics (task=segment, 2 salidas)")
         names = ast.literal_eval(meta["names"]) if "names" in meta else {}
-        if not self.info.classes:
+        self.info.magnifications = []
+        if not self._declared:
             self.info.classes = [ClassInfo(i + 1, str(names[i]), DEFAULT_COLORS[i % len(DEFAULT_COLORS)])
                                  for i in sorted(names)]
-        elif names and len(names) != len(self.info.classes):
-            raise BackendError(f"El modelo tiene {len(names)} clases y el backend declara {len(self.info.classes)}")
-        self._session, self._meta, self.model = session, meta, model_id
+        elif names and len(names) != len(self._declared):
+            raise BackendError(f"El modelo tiene {len(names)} clases y el backend declara {len(self._declared)}")
+        else:
+            self.info.classes = list(self._declared)
+        self._session, self._meta, self._manifest, self.model = session, meta, None, model_id
         return _label(model_id)
+
+    @staticmethod
+    def _check_semantic(session, manifest, path):
+        """Prueba de humo: el modelo tiene que producir [1, C, H, W] con un canal por clase."""
+        probe = np.zeros((32, 32, 3), np.uint8)
+        try:
+            logits = session.run(None, {session.get_inputs()[0].name: semantic.preprocess(probe, manifest)[0]})[0]
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"{path} no corre con su manifiesto: {exc}") from exc
+        if logits.ndim != 4 or logits.shape[1] <= max(c.id for c in manifest.classes):
+            raise BackendError(f"{path}: salida {logits.shape} no encaja con las clases del manifiesto")
 
     def predict(self, image_path, magnification, bbox=None):
         if self._session is None:
@@ -168,6 +193,12 @@ class OnnxBackend:
             x, y, w, h = (int(v) for v in bbox)
             bgr = bgr[y : y + h, x : x + w]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        if self._manifest is not None:
+            name = self._session.get_inputs()[0].name
+            try:
+                return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, self._manifest)
+            except Exception as exc:  # noqa: BLE001
+                raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc
         imgsz = self.imgsz or int(ast.literal_eval(self._meta.get("imgsz", "[640, 640]"))[0])
         stride = int(self._meta.get("stride", 32))
         boxed, scale, pad = letterbox(rgb, imgsz, stride)
