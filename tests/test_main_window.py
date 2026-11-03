@@ -19,8 +19,10 @@ from gui_segesferoides.image_canvas import (
     TOOL_EDIT_MEASURE,
     TOOL_ERASER,
     TOOL_LASSO,
+    TOOL_LASSO_REMOVE,
     TOOL_MEASURE,
     TOOL_RECLASS,
+    TOOL_REFINE,
     TOOL_ZONE,
 )
 from gui_segesferoides.main_window import MainWindow
@@ -51,7 +53,8 @@ def window(qapp, tmp_path, monkeypatch):
     errors.clear()
     w = MainWindow([BackendSpec("fake", [sys.executable, FAKE])],
                    calibration_path=str(tmp_path / "calibration.json"),
-                   postprocess_path=str(tmp_path / "postprocess.json"))
+                   postprocess_path=str(tmp_path / "postprocess.json"),
+                   stats_path=str(tmp_path / "dataset_stats.json"))
     wait_idle(qapp, w)
     yield w
     w.dirty = False
@@ -109,6 +112,39 @@ def test_zone_prediction_only_touches_zone(qapp, window, image_path):
     wait_idle(qapp, window)
     ys, xs = np.nonzero(window.mask)
     assert xs.min() >= 10 and xs.max() < 90 and ys.min() >= 20 and ys.max() < 80
+
+
+def test_lasso_zone_prediction_only_touches_inside_the_lasso(qapp, window, image_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    window.open_image(image_path)
+    window._load_model("a")
+    wait_idle(qapp, window)
+    window.mask[:] = 0
+    window.mask[20:80, 10:90] = 3                      # lo que había: dentro y fuera del lazo
+    window.radio_zone_lasso.setChecked(True)
+    assert window.canvas.tool == "zone_lasso"
+    window._on_predict_clicked()                       # sin lazo todavía: no predice
+    assert window.undo_stack.undo(window.mask) is None
+    triangle = np.array([[10.0, 20.0], [90.0, 20.0], [10.0, 80.0]])
+    window.canvas.lasso_finished.emit(triangle)
+    assert window.canvas.zone_polygon is not None
+    window.dirty = False
+    window._on_predict_clicked()
+    wait_idle(qapp, window)
+    outside = np.zeros(window.mask.shape, bool)
+    outside[20:80, 10:90] = True
+    inside = np.zeros_like(outside)
+    cv2.fillPoly(inside.view(np.uint8), [np.round(triangle).astype(np.int32)], 1)
+    assert (window.mask[outside & ~inside] == 3).all()   # el resto del bbox queda como estaba
+    assert not (window.mask[inside] == 3).all()          # y adentro se pisó con la predicción
+
+
+def test_leaving_lasso_zone_mode_drops_the_zone(qapp, window, image_path):
+    window.open_image(image_path)
+    window.radio_zone_lasso.setChecked(True)
+    window.canvas.lasso_finished.emit(np.array([[10.0, 20.0], [90.0, 20.0], [10.0, 80.0]]))
+    window.radio_full.setChecked(True)
+    assert window.canvas.zone_polygon is None and window.canvas.tool != "zone_lasso"
 
 
 def test_save_writes_id_mask(qapp, window, image_path, tmp_path):
@@ -202,7 +238,8 @@ def test_uninstalled_backend_offers_install_then_connects(qapp, tmp_path, monkey
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
     w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"),
-                   postprocess_path=str(tmp_path / "postprocess.json"))
+                   postprocess_path=str(tmp_path / "postprocess.json"),
+                   stats_path=str(tmp_path / "dataset_stats.json"))
     qapp.processEvents()
     assert w.backend is None and w.uninstalled is spec
     assert not w.install_button.isHidden() and w.install_button.isEnabled()
@@ -218,7 +255,8 @@ def test_uninstalled_backend_offers_install_then_connects(qapp, tmp_path, monkey
 def test_uninstalled_without_install_steps_disables_button(qapp, tmp_path):
     spec = BackendSpec("sin-pasos", ["no/existe"], cwd=str(tmp_path / "nada"))
     w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"),
-                   postprocess_path=str(tmp_path / "postprocess.json"))
+                   postprocess_path=str(tmp_path / "postprocess.json"),
+                   stats_path=str(tmp_path / "dataset_stats.json"))
     assert w.uninstalled is spec and not w.install_button.isEnabled()
     w.close()
 
@@ -274,14 +312,24 @@ def test_mask_filename_matches_what_training_expects(qapp, window, image_path, t
         assert window._mask_filename() == expected
 
 
-def test_analyze_shows_reference_bars_when_backend_has_stats(window, image_path):
+def _set_reference(window):
+    """Estadística del dataset de la GUI, solo a 4x: la clase 2 con 4 métricas y la 1 solo con n."""
+    window.dataset_stats.set({"version": 1, "updated": "hoy", "n_images": 3, "stats": {
+        "4x": {"2": {"n": 10, "area": {"mean": 1500, "p5": 1000, "p95": 2000},
+                     "perimeter": {"mean": 160, "p5": 120, "p95": 200},
+                     "circularity": {"mean": 0.9, "p5": 0.8, "p95": 0.95}},
+               "1": {"n": 30}}}})
+
+
+def test_analyze_shows_reference_bars_when_the_dataset_has_stats(window, image_path):
+    _set_reference(window)
     _window_with_two_particles(window, image_path)
     window.combo_magnification.setCurrentText("4x")
     window._on_object_clicked(25, 25)              # clase 2, área 1500: dentro de [1000, 2000]
     dialog = window.particle_dialog
     assert dialog.bars["area"].isVisibleTo(dialog) and dialog.bars["area"].inside
     assert dialog.bars["circularity"].isVisibleTo(dialog)
-    assert not dialog.bars["equivalent_diameter"].isVisibleTo(dialog)   # el backend no la trae
+    assert not dialog.bars["equivalent_diameter"].isVisibleTo(dialog)   # la estadística no la trae
     assert dialog._counts == [("chicas", 30), ("grandes", 10)]
     window._on_object_clicked(120, 120)            # clase 1: solo trae n, sin métricas
     assert not any(b.isVisibleTo(dialog) for b in dialog.bars.values())
@@ -325,6 +373,7 @@ def test_calibration_dialog_edits_calibration(qapp, tmp_path):
 def test_export_attaches_reference_stats_only_when_enabled(qapp, window, image_path, tmp_path):
     import csv
 
+    _set_reference(window)
     window.open_image(image_path)
     window.combo_magnification.setCurrentText("4x")
     window.mask[:] = 0
@@ -338,7 +387,7 @@ def test_export_attaches_reference_stats_only_when_enabled(qapp, window, image_p
     rows = list(csv.DictReader(open(on, encoding="utf-8")))
     assert (rows[0]["ref_n"], rows[0]["ref_area_p5"], rows[0]["ref_area_p95"],
             rows[0]["ref_area_in_range"]) == ("10", "1000", "2000", "yes")
-    assert rows[0]["ref_diameter_p5"] == ""          # el backend no la trae
+    assert rows[0]["ref_diameter_p5"] == ""          # la estadística no la trae
     # el perímetro de un cuadrado de 40 px es 156: dentro de [120, 200]
     assert (rows[0]["perimeter_px"], rows[0]["ref_perimeter_p5"], rows[0]["ref_perimeter_mean"],
             rows[0]["ref_perimeter_p95"], rows[0]["ref_perimeter_in_range"]) == (
@@ -361,7 +410,18 @@ def test_csv_stats_option_persists(qapp, tmp_path):
     assert Calibration(str(tmp_path / "c.json")).csv_stats is True
 
 
-def _predict_and_spy(qapp, window, image_path):
+TEST_STATS = {"version": 1, "updated": "hoy", "n_images": 3, "stats": {
+    mag: {"2": {"n": 10, "diameter": {"mean": 20.0, "p5": 10.0, "p95": 30.0}}} for mag in ("4x", "10x")}}
+TEST_RULES = {"rules": [{"name": "regla de prueba", "enabled": True, "class": 2, "action": "delete",
+                         "conditions": [{"metric": "diameter", "op": "gt", "value": "c2.p5"}]}],
+              "fill_holes": []}
+
+
+def _predict_and_spy(qapp, window, image_path, rules=TEST_RULES):
+    """Predice con el backend falso (círculo de clase 2 en el centro) y las reglas dadas
+    (por defecto una que lo descarta, así hay un objeto descartado en el centro)."""
+    window.dataset_stats.set(TEST_STATS)
+    window.postprocess_store.set(rules)
     sent = []
     original = window.backend._request
 
@@ -382,9 +442,10 @@ def _predict_and_spy(qapp, window, image_path):
 
 def test_predict_shows_discarded_contours_only_when_checked(qapp, window, image_path):
     sent = _predict_and_spy(qapp, window, image_path)
-    assert "discarded_out" in sent[0] and "postprocess" not in sent[0]   # sin reglas del usuario
-    assert window.discarded is not None and window.discarded[:6, :6].all()
-    assert window.canvas.discarded == []                                  # checkbox apagado
+    assert "postprocess" not in sent[0] and "discarded_out" not in sent[0]   # el backend da la máscara cruda
+    assert window.discarded is not None and window.discarded[150, 200] == 2  # el círculo central
+    assert not window.mask.any()                                             # y ya no está en la máscara
+    assert window.canvas.discarded == []                                     # checkbox apagado
     window.check_discarded.setChecked(True)
     assert len(window.canvas.discarded) == 1
     window.check_discarded.setChecked(False)
@@ -393,14 +454,16 @@ def test_predict_shows_discarded_contours_only_when_checked(qapp, window, image_
 
 def test_hovering_a_discarded_object_says_why(qapp, window, image_path):
     _predict_and_spy(qapp, window, image_path)
-    text = window._discarded_text_at(2, 2)               # adentro del cuadrado descartado
-    assert "regla de prueba" in text and "Diámetro equivalente = 6.8 < 10.0 px" in text
-    assert "[c1.p5]" in text and "Clase 1" in text
+    text = window._discarded_text_at(200, 150)           # adentro del círculo descartado
+    assert "regla de prueba" in text and "Diámetro equivalente = 15" in text and "> 10.0 px" in text
+    assert "[c2.p5]" in text and "Clase 2" in text
     assert f"estadística de {window.combo_magnification.currentText()}" in text
-    assert window._discarded_text_at(30, 30) is None     # fuera de lo descartado
+    assert window._discarded_text_at(2, 2) is None       # fuera de lo descartado
 
 
 def test_discarded_reasons_follow_a_zone_prediction(qapp, window, image_path):
+    window.dataset_stats.set(TEST_STATS)
+    window.postprocess_store.set(TEST_RULES)
     window.open_image(image_path)
     window._load_model("a")
     wait_idle(qapp, window)
@@ -408,27 +471,37 @@ def test_discarded_reasons_follow_a_zone_prediction(qapp, window, image_path):
     window.canvas.selection = (10.0, 20.0, 80.0, 60.0)
     window._on_predict_clicked()
     wait_idle(qapp, window)
-    assert [(r["x"], r["y"]) for r in window.discarded_reasons] == [(10, 20)]  # coords de la imagen
-    assert "regla de prueba" in window._discarded_text_at(12, 22)
+    (reason,) = window.discarded_reasons
+    assert 10 <= reason["x"] < 90 and 20 <= reason["y"] < 80                  # coords de la imagen
+    assert "regla de prueba" in window._discarded_text_at(reason["x"], reason["y"])
     assert window._discarded_text_at(2, 2) is None
 
 
-def test_user_rules_are_saved_and_sent_with_predict(qapp, window, image_path, tmp_path):
+def test_rules_without_stats_are_skipped_and_reported(qapp, window, image_path):
+    _predict_and_spy(qapp, window, image_path)
+    window.dataset_stats.data = None
+    window._on_predict_clicked()
+    wait_idle(qapp, window)
+    assert window.mask.any() and "Sin estadística" in window.status_label.text()
+
+
+def test_user_rules_are_saved_and_applied(qapp, window, image_path, tmp_path):
     from gui_segesferoides.postprocess_store import PostprocessStore
     rules = {"rules": [{"name": "mía", "enabled": True, "class": 2, "action": "keep",
                         "conditions": [{"metric": "area", "op": "gt", "value": 10}]}], "fill_holes": []}
-    window.postprocess_store.set("fake", rules)
-    assert PostprocessStore(str(tmp_path / "postprocess.json")).get("fake") == rules
-    sent = _predict_and_spy(qapp, window, image_path)
-    assert sent[0]["postprocess"] == rules
+    _predict_and_spy(qapp, window, image_path, rules)
+    assert PostprocessStore(str(tmp_path / "postprocess.json")).get() == rules
+    assert window.mask.any() and not window.discarded.any()
 
 
-def test_postprocess_button_follows_backend_flag(qapp, window):
-    assert window.backend.info.supports_postprocess
-    window._load_model("a")
-    wait_idle(qapp, window)
-    assert window.postprocess_button.isEnabled()
-    assert window.backend.get_postprocess()["defaults"]["rules"][0]["name"] == "chicos"
+def test_postprocess_can_be_turned_off_to_see_the_raw_mask(qapp, window, image_path):
+    window.check_postprocess.setChecked(False)
+    _predict_and_spy(qapp, window, image_path)
+    assert window.mask.any() and window.discarded is None
+
+
+def test_postprocess_button_does_not_depend_on_the_backend(qapp, window):
+    assert window.postprocess_button.isEnabled() and not window.backend.info.supports_postprocess
 
 
 def test_postprocess_dialog_edits_rules(qapp):
@@ -590,8 +663,8 @@ def test_hover_text_is_connected_to_the_window_lookup(window):
 
 def test_discarded_text_without_reason_from_the_backend_says_so(qapp, window, image_path):
     _predict_and_spy(qapp, window, image_path)
-    window.discarded_texts.clear()                        # backend que no informa motivos
-    assert "no informó el motivo" in window._discarded_text_at(2, 2)
+    window.discarded_texts.clear()                        # objeto sin motivo registrado
+    assert "no informó el motivo" in window._discarded_text_at(200, 150)
 
 
 def test_discarded_text_mentions_a_reclassification_before_the_delete(qapp, window, image_path):
@@ -683,6 +756,7 @@ def test_csv_reference_columns_follow_the_same_unit(qapp, window, image_path, tm
     window.calibration.set("4x", 2.0, "µm")
     window.calibration.display_unit = "µm"
     window.calibration.csv_stats = True
+    _set_reference(window)
     window.open_image(image_path)
     window.combo_magnification.setCurrentText("4x")
     window.mask[:] = 0
@@ -1404,3 +1478,158 @@ def test_lasso_curve_is_curved_in_the_mask_not_a_straight_edge(qapp, window, ima
     above = np.flatnonzero(window.mask[:60, 150] == class_id)             # por encima del lado superior recto
     assert len(above) >= 3                                                # abulta al menos 3 px sobre la recta
     assert window.mask[80, 150] == class_id and window.mask[10, 10] == 0
+
+
+# ---------- Repasar segmentación ----------
+
+def _window_with_a_square(qapp, window, image_path):
+    window.open_image(image_path)
+    window._load_model("a")
+    wait_idle(qapp, window)
+    window.check_postprocess.setChecked(False)
+    window.mask[100:140, 100:140] = 2              # el backend falso devuelve un círculo de radio 15 en el centro
+    window.tool_buttons[TOOL_REFINE].setChecked(True)
+
+
+def test_refine_tool_shows_its_hint_and_buttons_only_when_selected(qapp, window):
+    assert window.refine_hint.isHidden() and window.refine_row.isHidden()
+    window.tool_buttons[TOOL_REFINE].setChecked(True)
+    assert not window.refine_hint.isHidden() and not window.refine_row.isHidden()
+    assert window.refine_hint.text().startswith("Tocar los objetos a repasar o presionar \"Repasar todos\"")
+    assert window.refine_button.text() == "Repasar todos"
+    assert window.refine_selected_button.isHidden()                  # sin objetos seleccionados
+    window.tool_buttons[TOOL_BRUSH].setChecked(True)
+    assert window.refine_hint.isHidden() and window.refine_row.isHidden()
+
+
+def test_touching_objects_selects_them_with_a_box_and_the_selected_button_follows(qapp, window, image_path):
+    _window_with_a_square(qapp, window, image_path)
+    window.mask[200:230, 300:330] = 2
+    window._on_object_clicked(120, 120)
+    assert window.canvas.refine_boxes == [(60, 60, 120, 120)]        # el objeto + 40 px por lado
+    assert not window.refine_selected_button.isHidden()
+    assert window.refine_selected_button.text() == "Repasar seleccionados (1)"
+    assert window.mask[101, 101] == 2                                # tocar solo marca: no repasa
+    window._on_object_clicked(315, 215)
+    assert window.refine_selected_button.text() == "Repasar seleccionados (2)"
+    window._on_object_clicked(120, 120)                              # tocar uno ya marcado lo desmarca
+    assert window.canvas.refine_boxes == [(260, 160, 110, 110)]
+    window._on_object_clicked(315, 215)
+    assert window.canvas.refine_boxes == [] and window.refine_selected_button.isHidden()
+
+
+def test_refine_selected_only_touches_the_selected_objects(qapp, window, image_path):
+    _window_with_a_square(qapp, window, image_path)
+    window.mask[200:230, 300:330] = 2
+    assert window.mask[145, 120] == 0
+    window._on_object_clicked(120, 120)
+    window.refine_selected_button.click()
+    wait_idle(qapp, window)
+    assert window.mask[145, 120] == 2                                # el círculo del modelo sobre el primero
+    assert window.mask[235, 315] == 0 and window.mask[201, 301] == 2   # el segundo ni se tocó
+    assert "Repasados 1 de 1" in window.status_label.text() and "Modelo A" in window.status_label.text()
+    assert window.canvas.refine_boxes == [] and window.refine_selected_button.isHidden()
+    window._undo()
+    assert window.mask[145, 120] == 0 and window.mask[101, 101] == 2   # un solo paso de deshacer
+
+
+def test_refine_all_goes_through_every_object_in_one_undo_step(qapp, window, image_path):
+    _window_with_a_square(qapp, window, image_path)
+    window.mask[200:230, 300:330] = 2
+    window.refine_button.click()
+    assert len(window.canvas.refine_boxes) == 2
+    wait_idle(qapp, window)
+    assert "Repasados 2 de 2" in window.status_label.text()
+    assert window.mask[145, 120] == 2 and window.mask[235, 315] == 2
+    window._undo()
+    assert window.mask[145, 120] == 0 and window.mask[235, 315] == 0
+
+
+def test_selection_is_dropped_when_leaving_the_tool(qapp, window, image_path):
+    _window_with_a_square(qapp, window, image_path)
+    window._on_object_clicked(120, 120)
+    window.tool_buttons[TOOL_BRUSH].setChecked(True)
+    window.tool_buttons[TOOL_REFINE].setChecked(True)
+    assert window.refine_selected == [] and window.canvas.refine_boxes == []
+
+
+def test_refine_on_background_does_nothing(qapp, window, image_path):
+    _window_with_a_square(qapp, window, image_path)
+    window._on_object_clicked(10, 10)
+    assert window.canvas.refine_boxes == [] and "No hay ningún objeto" in window.status_label.text()
+
+
+def test_switching_backend_keeps_the_magnification_of_the_image(qapp, window, tmp_path):
+    p = tmp_path / "muestra_10x.png"
+    cv2.imwrite(str(p), np.full((300, 400, 3), 90, np.uint8))
+    window.open_image(str(p))
+    assert window.combo_magnification.currentText() == "10x"       # sale del nombre de la imagen
+    window._connect_backend(window.specs[0])                       # "cambiar" de backend: se reconecta
+    wait_idle(qapp, window)
+    assert window.combo_magnification.currentText() == "10x"
+    window.combo_magnification.setCurrentText("4x")                # una elección manual también se conserva
+    window._connect_backend(window.specs[0])
+    wait_idle(qapp, window)
+    assert window.combo_magnification.currentText() == "4x"
+
+
+# ---------- Edición: Agregar / Remover / (línea) ----------
+
+def _edicion_layout(window):
+    return window.tool_buttons[TOOL_BRUSH].parentWidget().layout()
+
+
+def _edicion_order(window):
+    """Los widgets del grupo Edición en el orden en que aparecen: textos de sección, herramientas y líneas."""
+    from PyQt5.QtWidgets import QFrame, QLabel, QRadioButton
+    layout, order = _edicion_layout(window), []
+    for i in range(layout.count()):
+        w = layout.itemAt(i).widget()
+        if isinstance(w, QRadioButton):
+            order.append(w.text())
+        elif isinstance(w, QLabel) and w.text().startswith("<b>"):
+            order.append(w.text()[3:-4])
+        elif isinstance(w, QFrame) and w.frameShape() == QFrame.HLine:
+            order.append("---")
+    return order
+
+
+def test_edicion_is_split_in_add_remove_and_the_rest(window):
+    assert _edicion_order(window) == [
+        "Agregar", "Pincel (B)", "Lazo (L)",
+        "Remover", "Borrador (E)", "Borrar objeto (D)", "Lazo",
+        "---", "Cambiar clase de objeto (R)", "Repasar segmentación", "---"]
+
+
+def test_class_selector_sliders_and_fill_holes_sit_below_every_tool(window):
+    layout = _edicion_layout(window)
+    index = layout.indexOf
+    last_tool = max(index(window.tool_buttons[t]) for t in window.tool_buttons
+                    if _group_title(window.tool_buttons[t]) == "Edición")
+    shared = [window.row_class, window.row_brush, window.row_eraser]
+    assert all(index(w) > last_tool for w in shared)
+    fill = [layout.itemAt(i).widget() for i in range(layout.count())][-1]
+    assert fill.text().startswith("Rellenar huecos") and index(fill) > index(window.row_class)
+
+
+def test_the_removing_lasso_erases_what_is_inside_and_is_one_undo_step(qapp, window, image_path):
+    window.open_image(image_path)
+    window.mask[:] = 0
+    window.mask[30:160, 40:200] = 2                         # un objeto grande
+    window.tool_buttons[TOOL_LASSO_REMOVE].setChecked(True)
+    assert window.canvas.tool == TOOL_LASSO_REMOVE and window.lasso_hint.text().endswith("Lo de adentro se borra.")
+    assert window.row_class.isHidden()                       # no usa clase
+    _lasso_triangle(window)
+    assert window.mask[70, 110] == 0                         # lo de adentro del lazo se borró
+    assert window.mask[140, 190] == 2 and window.mask[40, 50] == 2   # lo de afuera sigue
+    assert window.dirty and "Zona borrada" in window.status_label.text()
+    window._undo()
+    assert window.mask[70, 110] == 2
+
+
+def test_the_removing_lasso_over_background_changes_nothing(qapp, window, image_path):
+    window.open_image(image_path)
+    window.mask[:] = 0
+    window.tool_buttons[TOOL_LASSO_REMOVE].setChecked(True)
+    _lasso_triangle(window)
+    assert not window.mask.any() and not window.dirty

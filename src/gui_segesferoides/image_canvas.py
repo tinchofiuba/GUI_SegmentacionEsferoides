@@ -36,18 +36,26 @@ TOOL_ERASER = "eraser"
 TOOL_DELETE = "delete"
 TOOL_RECLASS = "reclass"
 TOOL_ANALYZE = "analyze"
+TOOL_REFINE = "refine"                   # repasar un objeto con el modelo (sobre su recuadro)
 TOOL_LASSO = "lasso"                     # trazar un contorno curvo que se rellena como objeto
+TOOL_LASSO_REMOVE = "lasso_remove"       # el mismo lazo, pero lo de adentro se borra
+TOOL_ZONE_LASSO = "zone_lasso"           # zona de predicción con forma de lazo (el modelo ve su recuadro)
+LASSO_TOOLS = (TOOL_LASSO, TOOL_LASSO_REMOVE, TOOL_ZONE_LASSO)
 TOOL_MEASURE = "measure"                 # trazar una línea de medida
 TOOL_EDIT_MEASURE = "edit_measure"       # elegir una medida para eliminarla, recolorearla o moverla
 STROKE_TOOLS = (TOOL_BRUSH, TOOL_ERASER)
-CLICK_TOOLS = (TOOL_DELETE, TOOL_RECLASS, TOOL_ANALYZE)
+CLICK_TOOLS = (TOOL_DELETE, TOOL_RECLASS, TOOL_ANALYZE, TOOL_REFINE)
 MEASURE_HIT_PX = 8         # a cuántos px de pantalla de la línea cuenta como "click sobre la medida"
 MEASURE_WIDTH = 2          # px de pantalla
 MEASURE_FONT_PX = 12
 LASSO_CLOSE_PX = 12        # a cuántos px de pantalla del primer punto un clic cierra el lazo
 LASSO_SAMPLE_PX = 10       # al arrastrar, cada cuántos px de pantalla se agrega un punto
+LASSO_REMOVE_COLOR = (255, 60, 60)   # el lazo que borra se dibuja en rojo, sea cual sea la clase elegida
+ZONE_LASSO_COLOR = (255, 255, 0)     # el lazo de zona se dibuja en amarillo, como el recuadro de zona
 LASSO_MIN_AREA = 4.0       # px²: un lazo más chico que esto no deja ningún objeto
 HIGHLIGHT_COLOR = (255, 0, 255)
+REFINE_COLOR = (0, 200, 255)      # recuadro del área que ve el modelo al repasar un objeto
+REFINE_WIDTH = 2
 DISCARDED_COLOR = (255, 40, 40)   # contornos de lo que las reglas de post-procesado quitaron
 HIGHLIGHT_WIDTH = 2        # px de pantalla: se ve igual con cualquier zoom
 
@@ -99,7 +107,9 @@ class ImageCanvas(QWidget):
         self.zoom = 1.0
         self.offset = (0.0, 0.0)
         self.selection = None      # (x, y, w, h) en coords de imagen
+        self.zone_polygon = None   # zona de predicción por lazo: polígono (N, 2) en coords de imagen
         self.highlight = []        # contornos (N, 2) en coords de imagen a resaltar
+        self.refine_boxes = []     # [(x, y, w, h)] en coords de imagen: áreas que usa el modelo al repasar
         self.discarded = []        # contornos de lo descartado por el post-procesado (en rojo)
         self.hover_text = None     # f(ix, iy) -> texto o None: tooltip de lo descartado
         self._fit_pending = True
@@ -145,7 +155,9 @@ class ImageCanvas(QWidget):
     def set_image(self, levels, mask):
         self.levels, self.mask = levels, mask
         self.selection = None
+        self.zone_polygon = None
         self.highlight = []
+        self.refine_boxes = []
         self.discarded = []
         self.measures = []                        # las medidas son de esa imagen
         self._reset_measure_state()
@@ -189,7 +201,8 @@ class ImageCanvas(QWidget):
         if self._lasso_cursor is not None:
             pts.append(self._lasso_cursor)               # el punto provisorio: así se ve el objeto que quedaría
         view = [viewport.image_to_view(self.offset, self.zoom, *p) for p in pts]
-        r, g, b = self.lasso_color
+        r, g, b = {TOOL_LASSO_REMOVE: LASSO_REMOVE_COLOR, TOOL_ZONE_LASSO: ZONE_LASSO_COLOR}.get(
+            self.tool, self.lasso_color)
         if len(view) >= 3:
             curve = smooth_closed_curve(view)
             polygon = QPolygonF([QPointF(x, y) for x, y in curve])
@@ -207,7 +220,7 @@ class ImageCanvas(QWidget):
             painter.drawEllipse(QPointF(x, y), radius, radius)
 
     def keyPressEvent(self, event):
-        if self.tool == TOOL_LASSO and self._lasso:
+        if self.tool in LASSO_TOOLS and self._lasso:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 self.lasso_close()
                 return
@@ -217,7 +230,7 @@ class ImageCanvas(QWidget):
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if self.tool == TOOL_LASSO and event.button() == Qt.LeftButton:
+        if self.tool in LASSO_TOOLS and event.button() == Qt.LeftButton:
             self.lasso_close()                           # doble clic: cierra (el clic de antes ya sumó su punto)
             return
         super().mouseDoubleClickEvent(event)             # el resto de las herramientas lo toma como un clic
@@ -349,6 +362,8 @@ class ImageCanvas(QWidget):
         self.tool = tool
         if tool != TOOL_ZONE:
             self.selection = None
+        if tool != TOOL_ZONE_LASSO:
+            self.zone_polygon = None
         self.setCursor(self._tool_cursor())
         self.update()
 
@@ -412,8 +427,18 @@ class ImageCanvas(QWidget):
             painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.DashLine))
             painter.drawRect(QRectF(vx, vy, sw * self.zoom, sh * self.zoom))
 
+        if self.zone_polygon is not None:
+            view = [viewport.image_to_view(self.offset, self.zoom, x, y) for x, y in self.zone_polygon]
+            painter.setPen(QPen(QColor(*ZONE_LASSO_COLOR), 2, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in view]))
+
         self._draw_contours(painter, self.discarded, DISCARDED_COLOR, dashed=True)
         self._draw_contours(painter, self.highlight, HIGHLIGHT_COLOR)
+        painter.setPen(QPen(QColor(*REFINE_COLOR), REFINE_WIDTH))
+        for bx, by, bw, bh in self.refine_boxes:
+            vx, vy = viewport.image_to_view(self.offset, self.zoom, bx, by)
+            painter.drawRect(QRectF(vx, vy, bw * self.zoom, bh * self.zoom))
         self._draw_lasso(painter)
         self._draw_measures(painter)
 
@@ -453,10 +478,12 @@ class ImageCanvas(QWidget):
             self.update()
         elif self.tool in CLICK_TOOLS:
             self.object_clicked.emit(ix, iy)
-        elif self.tool == TOOL_LASSO:
+        elif self.tool in LASSO_TOOLS:
             if self._near_first_point(event.x(), event.y()):
                 self.lasso_close()                       # clic sobre el primer punto: cierra
                 return
+            if self.tool == TOOL_ZONE_LASSO and not self._lasso:
+                self.zone_polygon = None                 # empezar otro lazo suelta la zona anterior
             h, w = self.levels[0].shape[:2]
             self._lasso_add(clamp_point((ix, iy), w, h))
             self._lasso_dragging, self._lasso_drag_added = True, False
@@ -496,7 +523,7 @@ class ImageCanvas(QWidget):
         elif self._zone_origin is not None:
             ix, iy = self._to_image(event.pos())
             self.selection = self._clamped_rect(self._zone_origin, (ix, iy))
-        elif self.tool == TOOL_LASSO and self._lasso:
+        elif self.tool in LASSO_TOOLS and self._lasso:
             ix, iy = self._to_image(event.pos())
             h, w = self.levels[0].shape[:2]
             self._lasso_cursor = clamp_point((ix, iy), w, h)
@@ -544,7 +571,7 @@ class ImageCanvas(QWidget):
             elif self._stroking:
                 self._stroking = False
                 self.stroke_finished.emit()
-            elif self.tool == TOOL_LASSO and self._lasso_dragging:
+            elif self.tool in LASSO_TOOLS and self._lasso_dragging:
                 self._lasso_dragging = False
                 if self._lasso_drag_added and self._near_first_point(event.x(), event.y()):
                     self.lasso_close()                   # el trazo a mano alzada volvió al punto de partida

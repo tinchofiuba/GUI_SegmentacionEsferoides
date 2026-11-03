@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 
 from gui_segesferoides.editing import (
-    count_objects,
     UndoStack,
+    count_objects,
     fill_holes,
     paint_circle,
     paint_segment,
@@ -157,3 +157,62 @@ def test_count_objects_uses_4_connectivity_like_the_rest_of_the_gui():
 
 def test_count_objects_of_an_empty_mask():
     assert count_objects(np.zeros((8, 8), np.uint8)) == {}
+
+
+# ---------- Repasar segmentación ----------
+
+def test_padded_box_adds_margin_and_clamps_to_the_image():
+    from gui_segesferoides.editing import padded_box
+    assert padded_box((50, 40, 20, 10), 10, (200, 300)) == (40, 30, 40, 30)
+    assert padded_box((3, 4, 20, 10), 10, (30, 25)) == (0, 0, 25, 24)       # recortado a la imagen
+
+
+def test_object_targets_one_per_object_with_margin():
+    from gui_segesferoides.editing import object_target_at, object_targets
+    mask = np.zeros((200, 200), np.uint8)
+    mask[50:70, 50:80] = 1
+    mask[120:140, 20:40] = 2
+    t = object_target_at(mask, 60, 60)
+    assert t["class"] == 1 and t["box"] == (10, 10, 110, 100) and t["seed"] == (60, 60)
+    assert object_target_at(mask, 5, 5) is None
+    targets = object_targets(mask)
+    assert [(t["class"], t["box"]) for t in targets] == [(1, (10, 10, 110, 100)), (2, (0, 80, 80, 100))]
+    assert all(mask[t["seed"][1], t["seed"][0]] == t["class"] for t in targets)
+
+
+def test_merge_refined_replaces_only_the_object_and_keeps_neighbours():
+    from gui_segesferoides.editing import merge_refined
+    mask = np.zeros((100, 100), np.uint8)
+    mask[30:50, 30:50] = 1                          # objeto a repasar
+    mask[30:50, 55:65] = 2                          # vecino dentro del recuadro
+    box = (20, 20, 60, 40)
+    pred = np.zeros((40, 60), np.uint8)
+    pred[15:25, 15:25] = 2                          # el modelo ve algo más chico y de otra clase
+    pred[15:25, 40:50] = 1                          # y un "objeto" que no se toca con el viejo
+    assert merge_refined(mask, box, (40, 40), pred, {1, 2})
+    assert (mask[35:45, 35:45] == 2).all() and mask[31, 31] == 0   # el viejo cambió
+    assert (mask[30:50, 55:65] == 2).all()                         # el vecino sigue igual
+    assert mask[40, 65] == 0                                       # lo que no se superpone no entra
+
+
+def test_merge_refined_keeps_the_original_when_the_model_finds_nothing_or_unknown_ids():
+    from gui_segesferoides.editing import merge_refined
+    mask = np.zeros((60, 60), np.uint8)
+    mask[20:40, 20:40] = 1
+    before = mask.copy()
+    box = (10, 10, 40, 40)
+    assert not merge_refined(mask, box, (30, 30), np.zeros((40, 40), np.uint8), {1})
+    assert not merge_refined(mask, box, (30, 30), np.full((40, 40), 9, np.uint8), {1})   # id no declarado
+    assert (mask == before).all()
+
+
+def test_erase_polygon_clears_only_the_inside_and_reports_changes():
+    from gui_segesferoides.editing import erase_polygon
+    mask = np.zeros((100, 100), np.uint8)
+    mask[20:80, 20:80] = 2
+    assert erase_polygon(mask, [(30, 30), (70, 30), (70, 70), (30, 70)])
+    assert (mask[32:68, 32:68] == 0).all() and mask[25, 25] == 2 and mask[75, 75] == 2
+    again = mask.copy()
+    assert not erase_polygon(mask, [(30, 30), (70, 30), (70, 70), (30, 70)])   # ya estaba vacío
+    assert not erase_polygon(mask, [(1, 1), (5, 1)]) and (mask == again).all()
+    assert not erase_polygon(mask, [(-50, -50), (-40, -50), (-40, -40)])       # afuera de la imagen

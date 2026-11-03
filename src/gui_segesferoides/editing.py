@@ -41,6 +41,23 @@ def fill_polygon(mask, polygon, class_id):
     return True
 
 
+def erase_polygon(mask, polygon):
+    """Borra (pone en 0), in-place, el interior de `polygon` (puntos (N, 2) en coordenadas de imagen).
+    Devuelve True si algo cambió: un polígono sin área, o que solo cubre fondo, no hace nada."""
+    pts = np.asarray(polygon, dtype=float)
+    if len(pts) < 3:
+        return False
+    h, w = mask.shape
+    x0, y0 = max(int(np.floor(pts[:, 0].min())) - 1, 0), max(int(np.floor(pts[:, 1].min())) - 1, 0)
+    x1, y1 = min(int(np.ceil(pts[:, 0].max())) + 2, w), min(int(np.ceil(pts[:, 1].max())) + 2, h)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    sub = mask[y0:y1, x0:x1]
+    before = sub.copy()
+    fill_polygon(sub, pts - (x0, y0), 0)
+    return not np.array_equal(before, sub)
+
+
 def replace_object(mask, x, y, new_class):
     """Reasigna a `new_class` (0 = borrar) el objeto conexo bajo (x, y), es
     decir, la región 4-conexa con la misma clase. Devuelve True si cambió algo.
@@ -84,6 +101,68 @@ def object_region(mask, x, y):
     cv2.floodFill(mask, flood, (x, y), 0, loDiff=0, upDiff=0,
                   flags=4 | cv2.FLOODFILL_MASK_ONLY | (1 << 8))
     return flood[1:-1, 1:-1] == 1
+
+
+REFINE_MARGIN = 40   # px de imagen alrededor del objeto que ve el modelo al repasarlo
+
+
+def padded_box(box, margin, shape):
+    """`box` (x, y, w, h) ampliado `margin` px por lado y recortado a una imagen de `shape` (h, w)."""
+    x, y, w, h = box
+    x0, y0 = max(x - margin, 0), max(y - margin, 0)
+    x1, y1 = min(x + w + margin, shape[1]), min(y + h + margin, shape[0])
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def object_target_at(mask, x, y, margin=REFINE_MARGIN):
+    """Objeto bajo (x, y) para repasar: {"class", "seed": (x, y) un píxel adentro, "box": (x, y, w, h)
+    del objeto con `margin` px por lado}; None si ahí hay fondo."""
+    region = object_region(mask, x, y)
+    if region is None:
+        return None
+    box = padded_box(cv2.boundingRect(region.astype(np.uint8)), margin, mask.shape)
+    return {"class": int(mask[int(y), int(x)]), "seed": (int(x), int(y)), "box": box}
+
+
+def object_targets(mask, margin=REFINE_MARGIN):
+    """Todos los objetos de `mask` (componentes 4-conexos de una misma clase), como `object_target_at`,
+    ordenados por clase y luego por posición (y, x)."""
+    targets = []
+    for class_id in (int(c) for c in np.unique(mask) if c != 0):
+        n, labels, boxes, _ = cv2.connectedComponentsWithStats((mask == class_id).astype(np.uint8), connectivity=4)
+        for k in range(1, n):
+            x, y, w, h, _ = (int(v) for v in boxes[k])
+            ys, xs = np.nonzero(labels[y : y + h, x : x + w] == k)
+            targets.append({"class": class_id, "seed": (x + int(xs[0]), y + int(ys[0])),
+                            "box": padded_box((x, y, w, h), margin, mask.shape)})
+    targets.sort(key=lambda t: (t["class"], t["box"][1], t["box"][0]))
+    return targets
+
+
+def merge_refined(mask, box, seed, pred, valid_ids):
+    """Reemplaza, in-place, el objeto de `mask` que contiene a `seed` por lo que `pred` (máscara de ids
+    del recorte `box`) segmenta sobre él: quedan los componentes de `pred` que se superponen con el objeto
+    viejo, con la clase de `pred`. No toca a los vecinos (solo pisa el objeto viejo y fondo). Los ids de
+    `pred` fuera de `valid_ids` se ignoran. Devuelve False (y no cambia nada) si el modelo no segmentó nada
+    sobre el objeto."""
+    x, y, w, h = box
+    sub = mask[y : y + h, x : x + w]
+    sx, sy = seed[0] - x, seed[1] - y
+    if pred.shape != sub.shape or not (0 <= sx < w and 0 <= sy < h) or sub[sy, sx] == 0:
+        return False
+    _, labels = cv2.connectedComponents((sub == sub[sy, sx]).astype(np.uint8), connectivity=4)
+    old = labels == labels[sy, sx]
+    pred = np.where(np.isin(pred, list(valid_ids)), pred, 0)
+    keep = np.zeros(old.shape, bool)
+    for c in (int(v) for v in np.unique(pred[old]) if v != 0):
+        _, comp = cv2.connectedComponents((pred == c).astype(np.uint8), connectivity=8)
+        keep |= np.isin(comp, np.unique(comp[old & (pred == c)])) & (pred == c)
+    if not keep.any():
+        return False
+    sub[old] = 0
+    paint = keep & (sub == 0)
+    sub[paint] = pred[paint]
+    return True
 
 
 def fill_object_holes(mask, region):

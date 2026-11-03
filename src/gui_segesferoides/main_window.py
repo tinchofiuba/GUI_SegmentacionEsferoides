@@ -33,19 +33,25 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from gui_segesferoides.calibration import PX, Calibration
+from gui_segesferoides import postprocess
+from gui_segesferoides.calibration import MAGNIFICATIONS, PX, Calibration
 from gui_segesferoides.calibration_dialog import CalibrationDialog
 from gui_segesferoides.config import BackendSpec, create_backend
+from gui_segesferoides.dataset_stats import DatasetStats
 from gui_segesferoides.editing import (
     UndoStack,
     count_objects,
+    erase_polygon,
     fill_holes,
     fill_object_holes,
     fill_polygon,
     measure_objects,
+    merge_refined,
     object_contours,
     object_region,
     object_stats,
+    object_target_at,
+    object_targets,
     paint_segment,
     replace_object,
     save_mask,
@@ -57,26 +63,35 @@ from gui_segesferoides.image_canvas import (
     TOOL_EDIT_MEASURE,
     TOOL_ERASER,
     TOOL_LASSO,
+    TOOL_LASSO_REMOVE,
     TOOL_MEASURE,
     TOOL_RECLASS,
+    TOOL_REFINE,
     TOOL_ZONE,
+    TOOL_ZONE_LASSO,
     ImageCanvas,
 )
-from gui_segesferoides.measures import MEASURE_COLORS, render_measures
 from gui_segesferoides.installer import can_install, is_installed, plan, run_install
+from gui_segesferoides.measures import MEASURE_COLORS, render_measures
 from gui_segesferoides.particle_dialog import SELECTED, ParticleDialog
-from gui_segesferoides.dataset_stats import DatasetStats
 from gui_segesferoides.postprocess_dialog import PostprocessDialog
 from gui_segesferoides.postprocess_store import PostprocessStore
 from gui_segesferoides.viewport import build_pyramid
 
+LASSO_HINT = ("Marcá puntos con clic (o arrastrá a mano alzada): la curva pasa por todos. Cerrala con clic "
+              "sobre el primer punto, doble clic o Enter; Esc cancela.")
+ZONE_LASSO_HINT = ("Dibujá un lazo sobre la imagen: se predice solo lo de adentro. "
+                   "Cerralo con clic en el primer punto, doble clic o Enter.")
 TOOL_LABELS = [
     (TOOL_ZONE, "Zona (Z)"),
+    (TOOL_ZONE_LASSO, "Zona con lazo"),
     (TOOL_BRUSH, "Pincel (B)"),
     (TOOL_LASSO, "Lazo (L)"),
+    (TOOL_LASSO_REMOVE, "Lazo"),
     (TOOL_ERASER, "Borrador (E)"),
     (TOOL_DELETE, "Borrar objeto (D)"),
     (TOOL_RECLASS, "Cambiar clase de objeto (R)"),
+    (TOOL_REFINE, "Repasar segmentación"),
     (TOOL_ANALYZE, "Analizar objeto (A)"),
     (TOOL_MEASURE, "Medir distancia"),
     (TOOL_EDIT_MEASURE, "Editar medida"),
@@ -141,12 +156,14 @@ class MainWindow(QMainWindow):
         self.image_path = None
         self.mask = None            # np.ndarray uint8 con ids de clase, resolución nativa
         self.undo_stack = UndoStack()
+        self.pending_inside = None  # máscara booleana del bbox con la zona por lazo (None: todo el bbox)
         self.pending_bbox = None    # bbox (resolución nativa) de la predicción en curso
         self.pending_magnification = ""   # magnificación de la predicción en curso
         self.origin = "manual"      # manual | modelo | modelo_corregido
         self.dirty = False
         self.uninstalled = None     # BackendSpec elegido pero no instalado
         self.particle = None        # máscara booleana de la partícula analizada
+        self.refine_selected = []   # objetos marcados para repasar (ver editing.object_target_at)
         self.particle_dialog = None
 
         self.setWindowTitle("Tagging y predicción de segmentaciones")
@@ -276,19 +293,26 @@ class MainWindow(QMainWindow):
         g.setSpacing(1)
         self.radio_full = QRadioButton("Imagen completa")
         self.radio_zone = QRadioButton("Zona seleccionada (Z)")
+        self.radio_zone_lasso = QRadioButton("Zona con lazo")
         mode_group = QButtonGroup(self)
-        mode_group.addButton(self.radio_full)
-        mode_group.addButton(self.radio_zone)
-        self.radio_zone.toggled.connect(self._on_prediction_mode)
+        for radio in (self.radio_full, self.radio_zone, self.radio_zone_lasso):
+            mode_group.addButton(radio)
+        self.radio_full.toggled.connect(lambda on: on and self._on_prediction_mode(None))
+        self.radio_zone.toggled.connect(lambda on: on and self._on_prediction_mode(TOOL_ZONE))
+        self.radio_zone_lasso.toggled.connect(lambda on: on and self._on_prediction_mode(TOOL_ZONE_LASSO))
         g.addWidget(self.radio_full)
         g.addWidget(self.radio_zone)
-        # La herramienta Zona es la forma de dibujar el rectángulo del modo "zona":
-        # no tiene botón propio, la activa el modo. Cuelga del panel, oculta y fuera
+        g.addWidget(self.radio_zone_lasso)
+        # Las herramientas Zona y Zona con lazo son la forma de dibujar la zona de esos
+        # modos: no tienen botón propio, las activa el modo. Cuelga del panel, oculta y fuera
         # de todo layout, para que no sea un widget huérfano.
         zone_button = tool_button(TOOL_ZONE, "Zona")
         zone_button.setParent(panel)
         zone_button.hide()
-        self.zone_hint = QLabel("Dibujá un rectángulo sobre la imagen.")
+        zone_lasso_button = tool_button(TOOL_ZONE_LASSO, "Zona con lazo")
+        zone_lasso_button.setParent(panel)
+        zone_lasso_button.hide()
+        self.zone_hint = QLabel()
         self.zone_hint.setWordWrap(True)
         self.zone_hint.setVisible(False)
         g.addWidget(self.zone_hint)
@@ -300,8 +324,13 @@ class MainWindow(QMainWindow):
         self.predict_button.clicked.connect(self._on_predict_clicked)
         self.predict_button.setEnabled(False)
         g.addWidget(self.predict_button)
+        self.check_postprocess = QCheckBox("Aplicar post-proceso")
+        self.check_postprocess.setChecked(True)
+        self.check_postprocess.setToolTip("Aplica las reglas de la GUI (y la estadística del dataset) a la máscara "
+                                          "que devuelve el modelo. Apagado: máscara cruda del modelo.")
+        g.addWidget(self.check_postprocess)
         self.postprocess_button = QPushButton("Post-proceso...")
-        self.postprocess_button.setToolTip("Reglas con las que el backend filtra la predicción")
+        self.postprocess_button.setToolTip("Reglas con las que la GUI filtra la predicción")
         self.postprocess_button.clicked.connect(self._on_postprocess)
         g.addWidget(self.postprocess_button)
         self.check_discarded = QCheckBox("Ver descartados (rojo)")
@@ -317,12 +346,47 @@ class MainWindow(QMainWindow):
         self.group_boxes["Edición"] = group
         g = QVBoxLayout(group)
         g.setSpacing(1)
-        for tool, label in TOOL_LABELS:
-            if tool in (TOOL_BRUSH, TOOL_LASSO, TOOL_ERASER, TOOL_DELETE, TOOL_RECLASS):
-                g.addWidget(tool_button(tool, label))
-        self.lasso_hint = QLabel("Marcá puntos con clic (o arrastrá a mano alzada): la curva pasa por "
-                                 "todos. Cerrala con clic sobre el primer punto, doble clic o Enter; "
-                                 "Esc cancela. Se rellena con la clase elegida.")
+        labels = dict(TOOL_LABELS)
+
+        def section(title):
+            g.addWidget(QLabel(f"<b>{title}</b>"))
+
+        def line():
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setFrameShadow(QFrame.Sunken)
+            g.addWidget(sep)
+
+        section("Agregar")
+        for tool in (TOOL_BRUSH, TOOL_LASSO):
+            g.addWidget(tool_button(tool, labels[tool]))
+        section("Remover")
+        for tool in (TOOL_ERASER, TOOL_DELETE, TOOL_LASSO_REMOVE):
+            g.addWidget(tool_button(tool, labels[tool]))
+        line()
+        for tool in (TOOL_RECLASS, TOOL_REFINE):
+            g.addWidget(tool_button(tool, labels[tool]))
+        self.refine_hint = QLabel("Tocar los objetos a repasar o presionar \"Repasar todos\" para hacerlo "
+                                  "con todos los objetos detectados.")
+        self.refine_hint.setWordWrap(True)
+        self.refine_button = QPushButton("Repasar todos")
+        self.refine_button.setToolTip("Repasa cada objeto de la máscara con el modelo elegido arriba de todo")
+        self.refine_button.clicked.connect(self._on_refine_all)
+        self.refine_selected_button = QPushButton()
+        self.refine_selected_button.setToolTip("Repasa solo los objetos marcados con recuadro")
+        self.refine_selected_button.clicked.connect(self._on_refine_selected)
+        self.refine_selected_button.setVisible(False)   # solo si hay objetos seleccionados
+        self.refine_row = QWidget()
+        refine_layout = QHBoxLayout(self.refine_row)
+        refine_layout.setContentsMargins(0, 0, 0, 0)
+        refine_layout.addWidget(self.refine_button)
+        refine_layout.addWidget(self.refine_selected_button)
+        g.addWidget(self.refine_hint)
+        g.addWidget(self.refine_row)
+        self.refine_hint.setVisible(False)
+        self.refine_row.setVisible(False)
+        line()   # debajo: lo que comparten las herramientas (clase, tamaños, rellenar huecos)
+        self.lasso_hint = QLabel(LASSO_HINT)
         self.lasso_hint.setWordWrap(True)
         self.lasso_hint.setVisible(False)
         g.addWidget(self.lasso_hint)
@@ -482,20 +546,22 @@ class MainWindow(QMainWindow):
     def _highlight_active_group(self, tool):
         """Enmarca el grupo al que pertenece la herramienta activa: así se nota con qué
         zona del panel se está trabajando (Predicción: zona; Edición; Análisis)."""
-        owner = {TOOL_ZONE: "Predicción", TOOL_BRUSH: "Edición", TOOL_LASSO: "Edición", TOOL_ERASER: "Edición",
-                 TOOL_DELETE: "Edición", TOOL_RECLASS: "Edición", TOOL_ANALYZE: "Análisis",
+        owner = {TOOL_ZONE: "Predicción", TOOL_ZONE_LASSO: "Predicción", TOOL_BRUSH: "Edición", TOOL_LASSO: "Edición",
+                 TOOL_LASSO_REMOVE: "Edición", TOOL_ERASER: "Edición", TOOL_DELETE: "Edición",
+                 TOOL_RECLASS: "Edición", TOOL_REFINE: "Edición", TOOL_ANALYZE: "Análisis",
                  TOOL_MEASURE: "Análisis", TOOL_EDIT_MEASURE: "Análisis"}[tool]
         self.active_group = owner
         for title, group in self.group_boxes.items():
             self._style_group(group, active=(title == owner))
 
-    def _on_prediction_mode(self, zone):
-        """El modo "zona" activa la herramienta Zona (y desmarca las de edición y análisis);
-        volver a "imagen completa" la suelta."""
-        self.zone_hint.setVisible(zone)
-        if zone:
-            self.tool_buttons[TOOL_ZONE].setChecked(True)
-        elif self.canvas.tool == TOOL_ZONE:
+    def _on_prediction_mode(self, tool):
+        """Los modos "zona" y "zona con lazo" activan su herramienta de dibujo (y desmarcan las de
+        edición y análisis); volver a "imagen completa" la suelta. `tool` es None para imagen completa."""
+        self.zone_hint.setVisible(tool is not None)
+        self.zone_hint.setText("Dibujá un rectángulo sobre la imagen." if tool == TOOL_ZONE else ZONE_LASSO_HINT)
+        if tool is not None:
+            self.tool_buttons[tool].setChecked(True)
+        elif self.canvas.tool in (TOOL_ZONE, TOOL_ZONE_LASSO):
             self.tool_buttons[TOOL_BRUSH].setChecked(True)
 
     def _build_shortcuts(self):
@@ -559,6 +625,7 @@ class MainWindow(QMainWindow):
     def _set_mask(self, mask):
         self.mask = mask
         self.canvas.mask = mask
+        self._clear_refine_selection()
         self.canvas.update()
 
     def _set_tool(self, tool):
@@ -566,13 +633,19 @@ class MainWindow(QMainWindow):
             self._clear_particle()
         self.canvas.set_tool(tool)
         self.row_class.setVisible(tool in (TOOL_BRUSH, TOOL_LASSO, TOOL_RECLASS))
-        self.lasso_hint.setVisible(tool == TOOL_LASSO)
+        self.lasso_hint.setVisible(tool in (TOOL_LASSO, TOOL_LASSO_REMOVE))
+        self.lasso_hint.setText(LASSO_HINT + (" Lo de adentro se borra." if tool == TOOL_LASSO_REMOVE
+                                              else " Se rellena con la clase elegida."))
+        self.refine_hint.setVisible(tool == TOOL_REFINE)
+        self.refine_row.setVisible(tool == TOOL_REFINE)
+        if tool != TOOL_REFINE:
+            self._clear_refine_selection()
         self.row_brush.setVisible(tool == TOOL_BRUSH)
         self.row_eraser.setVisible(tool == TOOL_ERASER)
         self._highlight_active_group(tool)
-        if tool != TOOL_ZONE and self.radio_zone.isChecked():
+        if tool not in (TOOL_ZONE, TOOL_ZONE_LASSO) and not self.radio_full.isChecked():
             # Una sola cosa activa a la vez: elegir pincel, borrador, etc. suelta el modo
-            # "zona seleccionada" (y la predicción vuelve a ser sobre la imagen completa).
+            # "zona" (y la predicción vuelve a ser sobre la imagen completa).
             self.radio_full.setChecked(True)
 
     # ---------- Backend / modelo ----------
@@ -609,11 +682,11 @@ class MainWindow(QMainWindow):
         self.install_button.setEnabled(free and self.uninstalled is not None
                                        and can_install(self.uninstalled))
         self.export_button.setEnabled(free and has_backend and self.mask is not None)
-        supports = has_backend and self.backend.info.supports_postprocess
         self.save_image_button.setEnabled(self.full_res_image is not None)
-        self.postprocess_button.setVisible(bool(supports))
-        self.postprocess_button.setEnabled(free and bool(supports) and self.model_loaded)
-        self.check_discarded.setVisible(bool(supports))
+        self.postprocess_button.setEnabled(free)
+        can_refine = free and has_backend and self.model_loaded and self.mask is not None
+        self.refine_button.setEnabled(can_refine)
+        self.refine_selected_button.setEnabled(can_refine)
         self.predict_button.setEnabled(
             free and has_backend and self.model_loaded and self.full_res_image is not None
         )
@@ -674,9 +747,15 @@ class MainWindow(QMainWindow):
             icon = _color_icon(info.palette[c.id]) if c.id in info.palette else QIcon()
             self.combo_class.addItem(icon, f"{c.id} - {c.name}", c.id)   # con el color de la clase
         self._update_lasso_color()
+        previous = self.combo_magnification.currentText()   # al cambiar de backend se conserva la elegida
         self.combo_magnification.clear()
-        self.combo_magnification.addItems(info.magnifications)
-        self.combo_magnification.setEnabled(bool(info.magnifications))
+        # la magnificación es de la GUI, no del modelo
+        mags = {*MAGNIFICATIONS, *info.magnifications, *self.dataset_stats.stats}
+        self.combo_magnification.addItems(sorted(mags, key=lambda m: int(m[:-1]) if m[:-1].isdigit() else 0))
+        if previous in mags:
+            self.combo_magnification.setCurrentText(previous)
+        elif self.image_path:
+            self._select_magnification_from_name(self.image_path)
         self._fill_models(models)
         self._update_controls()
         self.canvas.update()
@@ -831,16 +910,26 @@ class MainWindow(QMainWindow):
             self.canvas.update()
 
     def _on_lasso_finished(self, polygon):
-        """El lazo se cerró: el interior pasa a ser un objeto de la clase elegida (pisa lo que
-        hubiera), con un solo paso de deshacer."""
+        """El lazo se cerró. Agregar: el interior pasa a ser un objeto de la clase elegida (pisa lo que
+        hubiera). Remover: el interior se borra. Un solo paso de deshacer."""
+        if self.canvas.tool == TOOL_ZONE_LASSO:
+            self.canvas.zone_polygon = polygon
+            self.canvas.update()
+            self.status_label.setText("Zona marcada. Tocá Predecir.")
+            return
         if self.mask is None:
             return
         self.undo_stack.push(self.mask)
-        if fill_polygon(self.mask, polygon, self._selected_class()):
+        if self.canvas.tool == TOOL_LASSO_REMOVE:
+            changed, message = erase_polygon(self.mask, polygon), "Zona borrada con el lazo."
+        else:
+            name = self.combo_class.currentText().split(" - ", 1)[-1]
+            changed, message = fill_polygon(self.mask, polygon, self._selected_class()), \
+                f"Objeto agregado con el lazo: {name}."
+        if changed:
             self._mark_edited()
             self.canvas.update()
-            name = self.combo_class.currentText().split(" - ", 1)[-1]
-            self.status_label.setText(f"Objeto agregado con el lazo: {name}.")
+            self.status_label.setText(message)
         else:
             self.undo_stack.discard_last()                     # no cambió nada: descartar el snapshot
 
@@ -850,6 +939,9 @@ class MainWindow(QMainWindow):
         if self.canvas.tool == TOOL_ANALYZE:
             self._select_particle(x, y)
             return
+        if self.canvas.tool == TOOL_REFINE:
+            self._on_refine_clicked(x, y)
+            return
         new_class = 0 if self.canvas.tool == TOOL_DELETE else self._selected_class()
         self.undo_stack.push(self.mask)
         if replace_object(self.mask, x, y, new_class):
@@ -858,6 +950,97 @@ class MainWindow(QMainWindow):
         else:
             self.undo_stack.discard_last()  # no cambió nada: descartar el snapshot
             self.status_label.setText("No hay ningún objeto bajo el cursor.")
+
+    # ---------- Repasar segmentación ----------
+    def _can_refine(self):
+        if self.busy or self.backend is None or not self.model_loaded or self.mask is None:
+            self.status_label.setText("Para repasar hace falta una imagen y un modelo cargado (arriba de todo).")
+            return False
+        return True
+
+    def _update_refine_ui(self):
+        n = len(self.refine_selected)
+        self.refine_selected_button.setVisible(n > 0)
+        self.refine_selected_button.setText(f"Repasar seleccionados ({n})")
+        self.canvas.refine_boxes = [t["box"] for t in self.refine_selected]
+        self.canvas.update()
+
+    def _clear_refine_selection(self):
+        self.refine_selected = []
+        self._update_refine_ui()
+
+    def _on_refine_clicked(self, x, y):
+        """Marca (o desmarca, si ya estaba marcado) el objeto bajo el cursor para repasarlo."""
+        if self.busy:
+            return
+        region = object_region(self.mask, x, y)
+        if region is None:
+            self.status_label.setText("No hay ningún objeto bajo el cursor.")
+            return
+        marked = [t for t in self.refine_selected if region[t["seed"][1], t["seed"][0]]]
+        if marked:
+            self.refine_selected = [t for t in self.refine_selected if t not in marked]
+        else:
+            self.refine_selected.append(object_target_at(self.mask, x, y))
+        self._update_refine_ui()
+
+    def _on_refine_selected(self):
+        if self.refine_selected and self._can_refine():
+            self._refine(list(self.refine_selected))
+
+    def _on_refine_all(self):
+        if not self._can_refine():
+            return
+        targets = object_targets(self.mask)
+        if not targets:
+            self.status_label.setText("No hay objetos para repasar.")
+            return
+        self._refine(targets)
+
+    def _refine(self, targets):
+        """Corre el modelo elegido arriba de todo sobre el recuadro de cada objeto (el objeto con 40 px de
+        margen, a resolución nativa) y reemplaza el objeto por lo que segmenta (con el post-proceso, si
+        está activado). Los recuadros que se dibujan en pantalla no forman parte de la imagen que ve el
+        modelo: se lee de disco. Un solo paso de deshacer."""
+        backend, path = self.backend, self.image_path
+        magnification = self.combo_magnification.currentText()
+        config = self.postprocess_store.get() if self.check_postprocess.isChecked() else None
+        stats = self.dataset_stats.stats.get(magnification)
+        self.canvas.refine_boxes = [t["box"] for t in targets]   # lo que se está repasando
+        self.canvas.update()
+
+        def job():
+            results = []
+            for t in targets:
+                pred = backend.predict(path, magnification, t["box"])
+                if config is not None:
+                    pred = postprocess.apply(pred, config, stats)[0]
+                results.append((t, pred))
+            return results
+
+        what = "1 objeto" if len(targets) == 1 else f"{len(targets)} objetos"
+        self._run_async(job, self._on_refine_finished, self._on_refine_failed,
+                        f"Repasando {what} con {self.combo_model.currentText()}...")
+
+    def _on_refine_finished(self, results):
+        self._clear_particle()
+        self.undo_stack.push(self.mask)
+        valid = set(self.palette)
+        done = sum(merge_refined(self.mask, t["box"], t["seed"], pred, valid) for t, pred in results)
+        self._clear_refine_selection()
+        if done:
+            self._mark_edited()
+            self.canvas.update()
+        else:
+            self.undo_stack.discard_last()   # no cambió nada: descartar el snapshot
+        self.status_label.setText(f"Repasados {done} de {len(results)} objetos con "
+                                  f"{self.combo_model.currentText()}."
+                                  + ("" if done == len(results) else " El resto queda como estaba: el modelo no "
+                                     "segmentó nada sobre ellos."))
+
+    def _on_refine_failed(self, message):
+        self._update_refine_ui()          # vuelven los recuadros de lo que seguía marcado
+        self._show_error(message)
 
     def _on_fill_holes(self):
         if self.mask is None:
@@ -927,9 +1110,9 @@ class MainWindow(QMainWindow):
         self.canvas.update()
 
     def _reference_for(self, class_id):
-        """Estadística de entrenamiento de la clase (a la magnificación elegida)
-        y la cantidad de objetos de cada clase, si el backend la ofrece."""
-        stats = None if self.busy else self.backend.reference_stats()
+        """Estadística del dataset de la clase (a la magnificación elegida) y la
+        cantidad de objetos de cada clase, si ya hay estadística."""
+        stats = self.dataset_stats.stats
         magnification = self.combo_magnification.currentText()
         self.particle_dialog.magnification = magnification
         per_class = (stats or {}).get(magnification) or {}
@@ -1067,12 +1250,11 @@ class MainWindow(QMainWindow):
             f"Exportados {len(rows)} objetos: {csv_path} y {os.path.basename(mask_path)}")
 
     def _csv_reference(self):
-        """Estadística de entrenamiento de la magnificación elegida, para
-        adjuntarla al CSV (solo si está activado y el backend la ofrece)."""
+        """Estadística del dataset de la magnificación elegida, para adjuntarla
+        al CSV (solo si está activado)."""
         if not self.calibration.csv_stats:
             return None
-        stats = self.backend.reference_stats() or {}
-        return stats.get(self.combo_magnification.currentText())
+        return self.dataset_stats.stats.get(self.combo_magnification.currentText())
 
     @staticmethod
     def _csv_number(scale, kind, px):
@@ -1140,6 +1322,23 @@ class MainWindow(QMainWindow):
             full_h, full_w = self.full_res_image.shape[:2]
             x, y = int(sel[0]), int(sel[1])
             bbox = (x, y, max(1, min(int(sel[2]), full_w - x)), max(1, min(int(sel[3]), full_h - y)))
+        inside = None                    # con lazo: qué píxeles del bbox están dentro del polígono
+        if self.radio_zone_lasso.isChecked():
+            polygon = self.canvas.zone_polygon
+            if polygon is None:
+                QMessageBox.information(self, "Zona no seleccionada", "Dibujá un lazo sobre la imagen primero.")
+                return
+            polygon = np.asarray(polygon, float)
+            full_h, full_w = self.full_res_image.shape[:2]
+            x0, y0 = max(int(np.floor(polygon[:, 0].min())), 0), max(int(np.floor(polygon[:, 1].min())), 0)
+            x1 = min(int(np.ceil(polygon[:, 0].max())) + 1, full_w)
+            y1 = min(int(np.ceil(polygon[:, 1].max())) + 1, full_h)
+            bbox = (x0, y0, x1 - x0, y1 - y0)
+            inside = np.zeros((bbox[3], bbox[2]), np.uint8)
+            if x1 <= x0 or y1 <= y0 or not fill_polygon(inside, polygon - (x0, y0), 1):
+                QMessageBox.information(self, "Zona no seleccionada", "El lazo es demasiado chico.")
+                return
+            inside = inside.astype(bool)
 
         if self.dirty and np.any(self.mask):
             reply = QMessageBox.question(
@@ -1150,19 +1349,33 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
 
-        self.pending_bbox = bbox
+        self.pending_bbox, self.pending_inside = bbox, inside
         backend, path = self.backend, self.image_path
         magnification = self.pending_magnification = self.combo_magnification.currentText()
-        user_rules = self.postprocess_store.get(backend.info.name)
+        config = self.postprocess_store.get() if self.check_postprocess.isChecked() else None
+        stats = self.dataset_stats.stats.get(magnification)
+
+        def job():
+            pred = backend.predict(path, magnification, bbox)
+            discarded, reasons, warnings = None, [], []
+            if config is not None:                       # las reglas ven los objetos enteros, antes de recortar
+                pred, discarded = postprocess.apply(pred, config, stats, reasons, warnings)
+            if inside is not None and pred.shape == inside.shape:
+                pred = np.where(inside, pred, 0).astype(pred.dtype)
+                if discarded is not None:
+                    discarded = np.where(inside, discarded, 0).astype(discarded.dtype)
+                reasons = [r for r in reasons if inside[r["y"], r["x"]]]
+            return pred, discarded, reasons, warnings
+
         self._run_async(
-            lambda: backend.predict_with_discarded(path, magnification, bbox, user_rules),
+            job,
             self._on_predict_finished,
             self._on_predict_failed,
             "Procesando... (puede tardar varios segundos)",
         )
 
     def _on_predict_finished(self, result):
-        pred, discarded, reasons = result
+        pred, discarded, reasons, warnings = result
         bbox = self.pending_bbox
         full_h, full_w = self.mask.shape
         expected = (bbox[3], bbox[2]) if bbox else (full_h, full_w)
@@ -1180,7 +1393,11 @@ class MainWindow(QMainWindow):
             self._set_mask(pred)
         else:
             x, y, w, h = bbox
-            self.mask[y : y + h, x : x + w] = pred
+            region = self.mask[y : y + h, x : x + w]
+            if self.pending_inside is None:
+                region[:] = pred
+            else:
+                region[self.pending_inside] = pred[self.pending_inside]   # fuera del lazo no se toca
         # mezcla de tags previos y modelo => ya no es "puro modelo"
         self.origin = "modelo_corregido" if had_content else "modelo"
         self.dirty = True
@@ -1190,6 +1407,8 @@ class MainWindow(QMainWindow):
         found = count_objects(pred)             # cantidad de detecciones por clase, no de píxeles
         counts = ", ".join(f"{c.name}: {found.get(c.id, 0)}" for c in self.backend.info.classes)
         self.status_label.setText(f"Segmentación finalizada. — {counts}")
+        if warnings:
+            self.status_label.setText(self.status_label.text() + "  ·  Sin estadística: " + "; ".join(warnings))
 
     def _store_discarded(self, discarded, bbox, reasons=()):
         """Guarda lo que las reglas descartaron (a tamaño de imagen; con zona, solo
@@ -1207,10 +1426,15 @@ class MainWindow(QMainWindow):
                 self.discarded[:] = discarded
             else:
                 x, y, w, h = bbox
-                self.discarded[y : y + h, x : x + w] = discarded
+                inside = self.pending_inside
+                if inside is None:
+                    self.discarded[y : y + h, x : x + w] = discarded
+                else:
+                    self.discarded[y : y + h, x : x + w][inside] = discarded[inside]
                 self.discarded_reasons = [  # los de la zona se reemplazan por los nuevos
                     r for r in self.discarded_reasons
-                    if not (x <= r["x"] < x + w and y <= r["y"] < y + h)]
+                    if not (x <= r["x"] < x + w and y <= r["y"] < y + h
+                            and (inside is None or inside[r["y"] - y, r["x"] - x]))]
             self.discarded_reasons += [{**r, "x": r["x"] + ox, "y": r["y"] + oy,
                                         "magnification": self.pending_magnification} for r in reasons]
         self._index_discarded()
@@ -1278,26 +1502,19 @@ class MainWindow(QMainWindow):
         self.canvas.update()
 
     def _on_postprocess(self):
-        backend = self.backend
-        names = [(c.id, c.name) for c in backend.info.classes]
-
-        def open_editor(rules):
-            config = self.postprocess_store.get(backend.info.name) or rules
-            dialog = PostprocessDialog(config, rules["defaults"], names, self, self.dataset_stats, backend.info.palette)
-            if dialog.exec_() != dialog.Accepted:
-                return
-            edited = dialog.config()
-            try:
-                # lo igual a lo que trae el modelo no se guarda: así sigue las reglas del modelo
-                same = edited == {"rules": rules["rules"], "fill_holes": rules["fill_holes"]}
-                self.postprocess_store.set(backend.info.name, None if same else edited)
-            except OSError as exc:
-                QMessageBox.critical(self, "No se pudieron guardar las reglas", str(exc))
-                return
-            self.status_label.setText("Reglas de post-procesado guardadas: se aplican en la próxima predicción.")
-
-        self._run_async(backend.get_postprocess, open_editor, self._show_error,
-                        "Leyendo reglas del backend...")
+        names = [(c.id, c.name) for c in self.backend.info.classes] if self.backend else []
+        dialog = PostprocessDialog(self.postprocess_store.get(), postprocess.defaults(), names, self,
+                                   self.dataset_stats, self.backend.info.palette if self.backend else None)
+        if dialog.exec_() != dialog.Accepted:
+            return
+        edited = dialog.config()
+        try:
+            # lo igual a las de fábrica no se guarda: así sigue las de fábrica
+            self.postprocess_store.set(None if edited == postprocess.defaults() else edited)
+        except OSError as exc:
+            QMessageBox.critical(self, "No se pudieron guardar las reglas", str(exc))
+            return
+        self.status_label.setText("Reglas de post-procesado guardadas: se aplican en la próxima predicción.")
 
     def _on_predict_failed(self, message):
         self.status_label.setText("Error al predecir.")
