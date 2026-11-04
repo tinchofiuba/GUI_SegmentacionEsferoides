@@ -2,6 +2,8 @@
 clases) y la máscara es el argmax por píxel. El pre/post-procesado sale del manifiesto.
 Sin Qt ni onnxruntime: `infer` recibe una función `run(tensor) -> logits`."""
 
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
 
@@ -22,13 +24,14 @@ def preprocess(rgb, manifest):
     return np.ascontiguousarray(x.transpose(2, 0, 1)[None], dtype=np.float32), h, w
 
 
-def infer(run, rgb, manifest, tile=1024, overlap=128):
+def infer(run, rgb, manifest, tile=1024, overlap=128, workers=1):
     """Máscara uint8 (h, w) con los ids de clase del manifiesto (0 = fondo).
 
     Si el lado mayor supera `tile`, procesa por mosaicos: ventanas de `tile` px con un
     margen de contexto de `overlap` px por lado que se descarta (solo se conserva el
     centro de `tile - 2 * overlap`). Así la RAM queda acotada sin importar el tamaño de
-    la imagen. `tile=None` infiere la imagen entera de una vez."""
+    la imagen. `tile=None` infiere la imagen entera de una vez. Con `workers` > 1 los mosaicos
+    corren en paralelo (`run` debe ser seguro entre hilos, como `InferenceSession.run`)."""
     h, w = rgb.shape[:2]
     if not tile or max(h, w) <= tile:
         return _infer_whole(run, rgb, manifest)
@@ -36,13 +39,22 @@ def infer(run, rgb, manifest, tile=1024, overlap=128):
     if core < 1:
         raise ValueError(f"tile ({tile}) debe ser mayor que 2 * overlap ({overlap})")
     out = np.zeros((h, w), np.uint8)
-    for cy in range(0, h, core):
-        for cx in range(0, w, core):
-            y0, y1 = max(cy - overlap, 0), min(cy + core + overlap, h)
-            x0, x1 = max(cx - overlap, 0), min(cx + core + overlap, w)
-            window = _infer_whole(run, rgb[y0:y1, x0:x1], manifest)
-            ch, cw = min(core, h - cy), min(core, w - cx)
-            out[cy : cy + ch, cx : cx + cw] = window[cy - y0 : cy - y0 + ch, cx - x0 : cx - x0 + cw]
+
+    def do(origin):
+        cy, cx = origin
+        y0, y1 = max(cy - overlap, 0), min(cy + core + overlap, h)
+        x0, x1 = max(cx - overlap, 0), min(cx + core + overlap, w)
+        window = _infer_whole(run, rgb[y0:y1, x0:x1], manifest)
+        ch, cw = min(core, h - cy), min(core, w - cx)
+        out[cy : cy + ch, cx : cx + cw] = window[cy - y0 : cy - y0 + ch, cx - x0 : cx - x0 + cw]   # regiones disjuntas
+
+    origins = [(cy, cx) for cy in range(0, h, core) for cx in range(0, w, core)]
+    if workers > 1:
+        with ThreadPoolExecutor(workers) as pool:
+            list(pool.map(do, origins))     # list(): propaga las excepciones
+    else:
+        for origin in origins:
+            do(origin)
     return out
 
 

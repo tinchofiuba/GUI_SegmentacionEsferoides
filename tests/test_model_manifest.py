@@ -101,3 +101,21 @@ def test_tiled_rejects_overlap_without_core():
     m = parse_manifest(BASE)
     with pytest.raises(ValueError):
         semantic.infer(lambda x: x, np.zeros((300, 300, 3), np.uint8), m, tile=100, overlap=50)
+
+
+def test_parallel_tiles_equal_sequential():
+    m = parse_manifest(with_(input={"normalize": "unit", "pad_multiple": 32, "tta": ["vflip"]}))
+    rgb = np.random.default_rng(1).integers(0, 256, (300, 410, 3), dtype=np.uint8)
+
+    def run(x):
+        v = x[:, 1]
+        return np.stack([np.zeros_like(v), v - 0.4, 0.6 - v], axis=1).astype(np.float32)
+    assert (semantic.infer(run, rgb, m, 128, 16, workers=4) == semantic.infer(run, rgb, m, 128, 16, workers=1)).all()
+
+
+def test_parallel_tile_error_propagates():
+    m = parse_manifest(BASE)
+    def boom(x):
+        raise RuntimeError("falló")
+    with pytest.raises(RuntimeError):
+        semantic.infer(boom, np.zeros((300, 300, 3), np.uint8), m, 128, 16, workers=3)

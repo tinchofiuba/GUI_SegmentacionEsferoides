@@ -103,6 +103,7 @@ class OnnxBackend:
     imgsz         lado mayor del letterbox; por defecto el de la metadata (o 640)
     tile, tile_overlap   (modelos con manifiesto) mosaicos de `tile` px (1024) con `tile_overlap`
                   px de contexto por lado (128) cuando la imagen es más grande; tile: 0 = entera
+    workers       mosaicos en paralelo (por defecto min(4, núcleos // 3)); cada sesión usa núcleos // workers hilos
     """
 
     def __init__(self, spec):
@@ -115,6 +116,11 @@ class OnnxBackend:
         self.imgsz = int(o["imgsz"]) if o.get("imgsz") else None
         self.tile = int(o.get("tile", 1024))          # modelos con manifiesto: 0 = imagen entera
         self.tile_overlap = int(o.get("tile_overlap", 128))
+        cpus = os.cpu_count() or 1
+        # mosaicos en paralelo: 4 trabajadores x (núcleos/4) hilos cada uno. Medido en 12 núcleos con
+        # 3072x3072: 40 s -> 31 s; un recorte de una sola ventana no empeora con menos hilos por sesión.
+        self.workers = max(1, int(o.get("workers", min(4, cpus // 3))))
+        self.threads = max(1, cpus // self.workers)
         self.model = None
         self._session = None
         self._meta = {}
@@ -155,6 +161,7 @@ class OnnxBackend:
         options = ort.SessionOptions()
         options.enable_mem_pattern = False
         options.enable_cpu_mem_arena = False
+        options.intra_op_num_threads = self.threads
         try:
             session = ort.InferenceSession(model_id, options, providers=ort.get_available_providers())
         except Exception as exc:  # noqa: BLE001 - onnxruntime lanza tipos propios
@@ -206,7 +213,7 @@ class OnnxBackend:
             name = self._session.get_inputs()[0].name
             try:
                 return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, self._manifest,
-                                      self.tile, self.tile_overlap)
+                                      self.tile, self.tile_overlap, self.workers)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc
         imgsz = self.imgsz or int(ast.literal_eval(self._meta.get("imgsz", "[640, 640]"))[0])
