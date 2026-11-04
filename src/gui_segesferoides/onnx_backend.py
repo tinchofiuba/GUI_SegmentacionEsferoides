@@ -101,6 +101,8 @@ class OnnxBackend:
                   .onnx (`names`), con ids 1..n (0 es el fondo) y colores por defecto
     conf, iou     umbral de confianza (0.25) y de NMS (0.7), como Ultralytics
     imgsz         lado mayor del letterbox; por defecto el de la metadata (o 640)
+    tile, tile_overlap   (modelos con manifiesto) mosaicos de `tile` px (1024) con `tile_overlap`
+                  px de contexto por lado (128) cuando la imagen es más grande; tile: 0 = entera
     """
 
     def __init__(self, spec):
@@ -111,6 +113,8 @@ class OnnxBackend:
         self.models_globs = [os.path.expanduser(g) for g in ([globs] if isinstance(globs, str) else globs)]
         self.conf, self.iou = float(o.get("conf", 0.25)), float(o.get("iou", 0.7))
         self.imgsz = int(o["imgsz"]) if o.get("imgsz") else None
+        self.tile = int(o.get("tile", 1024))          # modelos con manifiesto: 0 = imagen entera
+        self.tile_overlap = int(o.get("tile_overlap", 128))
         self.model = None
         self._session = None
         self._meta = {}
@@ -201,7 +205,8 @@ class OnnxBackend:
         if self._manifest is not None:
             name = self._session.get_inputs()[0].name
             try:
-                return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, self._manifest)
+                return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, self._manifest,
+                                      self.tile, self.tile_overlap)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc
         imgsz = self.imgsz or int(ast.literal_eval(self._meta.get("imgsz", "[640, 640]"))[0])

@@ -22,8 +22,31 @@ def preprocess(rgb, manifest):
     return np.ascontiguousarray(x.transpose(2, 0, 1)[None], dtype=np.float32), h, w
 
 
-def infer(run, rgb, manifest):
-    """Máscara uint8 (h, w) con los ids de clase del manifiesto (0 = fondo)."""
+def infer(run, rgb, manifest, tile=1024, overlap=128):
+    """Máscara uint8 (h, w) con los ids de clase del manifiesto (0 = fondo).
+
+    Si el lado mayor supera `tile`, procesa por mosaicos: ventanas de `tile` px con un
+    margen de contexto de `overlap` px por lado que se descarta (solo se conserva el
+    centro de `tile - 2 * overlap`). Así la RAM queda acotada sin importar el tamaño de
+    la imagen. `tile=None` infiere la imagen entera de una vez."""
+    h, w = rgb.shape[:2]
+    if not tile or max(h, w) <= tile:
+        return _infer_whole(run, rgb, manifest)
+    core = tile - 2 * overlap
+    if core < 1:
+        raise ValueError(f"tile ({tile}) debe ser mayor que 2 * overlap ({overlap})")
+    out = np.zeros((h, w), np.uint8)
+    for cy in range(0, h, core):
+        for cx in range(0, w, core):
+            y0, y1 = max(cy - overlap, 0), min(cy + core + overlap, h)
+            x0, x1 = max(cx - overlap, 0), min(cx + core + overlap, w)
+            window = _infer_whole(run, rgb[y0:y1, x0:x1], manifest)
+            ch, cw = min(core, h - cy), min(core, w - cx)
+            out[cy : cy + ch, cx : cx + cw] = window[cy - y0 : cy - y0 + ch, cx - x0 : cx - x0 + cw]
+    return out
+
+
+def _infer_whole(run, rgb, manifest):
     tensor, h, w = preprocess(rgb, manifest)
     logits = run(tensor)
     for view in manifest.tta:

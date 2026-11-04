@@ -80,3 +80,24 @@ def test_real_u_resnet_model_with_manifest(tmp_path):
     mask = backend.predict(path, "4x")
     assert mask.shape == (70, 90) and set(np.unique(mask)) <= {0, 1, 2, 3}
     assert backend.predict(path, "4x", bbox=(10, 10, 40, 30)).shape == (30, 40)
+
+
+def test_tiled_matches_whole_for_a_local_model():
+    """Con un modelo sin contexto (cada píxel depende solo de sí mismo) los mosaicos dan
+    exactamente la misma máscara que la imagen entera, incluso con tamaños que no encajan."""
+    m = parse_manifest(with_(input={"normalize": "unit", "pad_multiple": 32, "tta": ["hflip"]}))
+    rng = np.random.default_rng(0)
+    rgb = rng.integers(0, 256, (437, 613, 3), dtype=np.uint8)
+
+    def run(x):   # logits [1, 3, H, W]: el canal ganador depende del valor del píxel
+        v = x[:, 0]
+        return np.stack([np.zeros_like(v), v - 0.5, 0.5 - v], axis=1).astype(np.float32)
+    whole = semantic.infer(run, rgb, m, tile=None)
+    for tile, overlap in [(128, 16), (200, 0), (100, 30)]:
+        assert (semantic.infer(run, rgb, m, tile, overlap) == whole).all()
+
+
+def test_tiled_rejects_overlap_without_core():
+    m = parse_manifest(BASE)
+    with pytest.raises(ValueError):
+        semantic.infer(lambda x: x, np.zeros((300, 300, 3), np.uint8), m, tile=100, overlap=50)
