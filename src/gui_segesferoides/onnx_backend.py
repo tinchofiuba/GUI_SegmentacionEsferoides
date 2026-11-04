@@ -146,8 +146,13 @@ class OnnxBackend:
             raise BackendError("Falta onnxruntime (uv add onnxruntime)") from exc
         if not os.path.exists(model_id):
             raise BackendError(f"No existe el modelo: {model_id}")
+        # Sin planificación previa de buffers ni arena: el pico de RAM baja ~3x (10 -> 3 GB en 3072x3072)
+        # con la misma máscara y sin costo de tiempo. Importa con imágenes grandes sin recortar.
+        options = ort.SessionOptions()
+        options.enable_mem_pattern = False
+        options.enable_cpu_mem_arena = False
         try:
-            session = ort.InferenceSession(model_id, providers=ort.get_available_providers())
+            session = ort.InferenceSession(model_id, options, providers=ort.get_available_providers())
         except Exception as exc:  # noqa: BLE001 - onnxruntime lanza tipos propios
             raise BackendError(f"No se pudo abrir {model_id}: {exc}") from exc
         manifest = load_manifest(model_id)
