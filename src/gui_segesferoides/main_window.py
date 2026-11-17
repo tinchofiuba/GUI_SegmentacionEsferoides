@@ -1,6 +1,6 @@
 """View de la app: ventana principal PyQt5. No sabe nada de ningún modelo:
 todo lo que necesita (clases, colores, magnificaciones, modelos disponibles,
-predicción) se lo pide a un backend por el protocolo de docs/protocol.md.
+predicción) se lo pide a un backend (ONNX, ver onnx_backend.py).
 """
 
 import csv
@@ -71,7 +71,6 @@ from gui_segesferoides.image_canvas import (
     TOOL_ZONE_LASSO,
     ImageCanvas,
 )
-from gui_segesferoides.installer import can_install, is_installed, plan, run_install
 from gui_segesferoides.measures import MEASURE_COLORS, render_measures
 from gui_segesferoides.particle_dialog import SELECTED, ParticleDialog
 from gui_segesferoides.postprocess_dialog import PostprocessDialog
@@ -142,11 +141,11 @@ class MainWindow(QMainWindow):
         self.postprocess_store = PostprocessStore(postprocess_path)
         self.dataset_stats = DatasetStats(stats_path)
         self.discarded = None       # uint8 (como la máscara): clase original de lo que descartaron las reglas
-        self.discarded_reasons = []  # [{x, y, rule, conditions...}] en coords de imagen (ver protocol.md)
+        self.discarded_reasons = []  # [{x, y, rule, conditions...}] en coords de imagen
         self.discarded_labels = None  # int32: id de objeto descartado por píxel (0 = nada)
         self.discarded_texts = {}    # {id de objeto: texto del tooltip}
         self.specs = list(specs)             # [BackendSpec]
-        self.backend = None                  # SubprocessBackend o CliBackend conectado
+        self.backend = None                  # OnnxBackend conectado
         self.model_loaded = False
         self.palette = {}                    # {id de clase: (r, g, b)}, del backend
         self.busy = False                    # una llamada al backend en curso
@@ -161,7 +160,6 @@ class MainWindow(QMainWindow):
         self.pending_magnification = ""   # magnificación de la predicción en curso
         self.origin = "manual"      # manual | modelo | modelo_corregido
         self.dirty = False
-        self.uninstalled = None     # BackendSpec elegido pero no instalado
         self.particle = None        # máscara booleana de la partícula analizada
         self.refine_selected = []   # objetos marcados para repasar (ver editing.object_target_at)
         self.particle_dialog = None
@@ -240,13 +238,6 @@ class MainWindow(QMainWindow):
         self.combo_model.setMinimumWidth(280)
         self.combo_model.activated.connect(self._on_model_selected)
         top.addWidget(self.combo_model)
-        self.browse_button = QPushButton("Examinar...")
-        self.browse_button.clicked.connect(self._on_browse_model)
-        top.addWidget(self.browse_button)
-        self.install_button = QPushButton("Instalar backend")
-        self.install_button.clicked.connect(self._on_install_clicked)
-        self.install_button.setVisible(False)
-        top.addWidget(self.install_button)
         return top
 
     def _build_side_panel(self):
@@ -676,11 +667,6 @@ class MainWindow(QMainWindow):
         free = not self.busy
         self.combo_backend.setEnabled(free and len(self.specs) > 1)
         self.combo_model.setEnabled(free and has_backend)
-        self.browse_button.setVisible(has_backend and self.backend.info.accepts_model_path)
-        self.browse_button.setEnabled(free)
-        self.install_button.setVisible(self.uninstalled is not None)
-        self.install_button.setEnabled(free and self.uninstalled is not None
-                                       and can_install(self.uninstalled))
         self.export_button.setEnabled(free and has_backend and self.mask is not None)
         self.save_image_button.setEnabled(self.full_res_image is not None)
         self.postprocess_button.setEnabled(free)
@@ -704,32 +690,8 @@ class MainWindow(QMainWindow):
         self.backend, self.model_loaded = None, False
         if old is not None:
             old.close()
-        self.uninstalled = None
-        if not is_installed(spec):
-            self._show_uninstalled(spec)
-            return
         self._run_async(connect, self._on_backend_connected, self._on_backend_failed,
                         f"Iniciando backend '{spec.name}'...")
-
-    def _show_uninstalled(self, spec):
-        self.uninstalled = spec
-        self.combo_model.clear()
-        self.status_label.setText(
-            f"El backend '{spec.name}' no está instalado."
-            + ("" if can_install(spec) else " (Sin pasos `install` en config/backends.yaml.)"))
-        self._update_controls()
-
-    def _on_install_clicked(self):
-        spec = self.uninstalled
-        commands = "\n".join("  " + " ".join(cmd) for cmd, _ in plan(spec))
-        reply = QMessageBox.question(
-            self, "Instalar backend",
-            f"Se va a instalar '{spec.name}' (descarga de la red, puede tardar varios minutos):\n\n"
-            f"{commands}\n\n¿Continuar?")
-        if reply != QMessageBox.Yes:
-            return
-        self._run_async(lambda: run_install(spec), lambda _: self._connect_backend(spec),
-                        self._show_error, f"Instalando '{spec.name}'... (puede tardar varios minutos)")
 
     def _on_backend_failed(self, message):
         self.status_label.setText("No se pudo iniciar el backend.")
@@ -783,11 +745,6 @@ class MainWindow(QMainWindow):
 
     def _on_model_selected(self, index):
         self._load_model(self.combo_model.itemData(index))
-
-    def _on_browse_model(self):
-        path = QFileDialog.getExistingDirectory(self, "Elegir carpeta de un modelo")
-        if path:
-            self._load_model(path)
 
     def _load_model(self, model_id):
         backend = self.backend

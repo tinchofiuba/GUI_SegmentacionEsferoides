@@ -1,10 +1,10 @@
 # GUI_SegmentacionEsferoides
 
 GUI de escritorio (PyQt5) para **predecir, corregir y taggear** máscaras de
-segmentación sobre imágenes de microscopía. No contiene ni importa ningún
-modelo: habla con *backends* (procesos aparte, cada uno con su propio Python)
-mediante un protocolo JSON de una línea por stdin/stdout — ver
-[docs/protocol.md](docs/protocol.md).
+segmentación sobre imágenes de microscopía. Es independiente del modelo: solo
+corre modelos **ONNX** (con `onnxruntime`, sin torch ni repos de modelos), y cada
+`.onnx` lleva al lado un manifiesto `.yaml` que dice cómo usarlo — ver
+[docs/model_manifest.md](docs/model_manifest.md).
 
 ## Uso
 
@@ -46,12 +46,12 @@ uv run gui-segesferoides
   medidas del análisis, en la unidad de *Calibrar*; las calibraciones van en
   `um_per_px_4x` y `um_per_px_10x`) y la misma máscara de ids.
 
-Las clases, colores y magnificaciones los declara el backend: la GUI no tiene
+Las clases, colores y magnificaciones los declara el manifiesto del modelo: la GUI no tiene
 ninguna clase escrita en el código.
 
 ## Tests
 
 ```bash
-uv run pytest        # usa tests/fake_backend.py, no necesita ningún modelo
+uv run pytest        # usa tests/fake_backend.py (en proceso); los tests con modelos reales se saltan si no están
 uv run ruff check .
 ```

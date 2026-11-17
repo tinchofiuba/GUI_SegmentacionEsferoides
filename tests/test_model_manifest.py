@@ -69,7 +69,7 @@ def test_tta_averages_flipped_views():
 
 @pytest.mark.skipif(not os.path.exists(REAL), reason="no está el modelo real")
 def test_real_u_resnet_model_with_manifest(tmp_path):
-    spec = BackendSpec(name="u", type="onnx", options={"models_glob": [REAL]})
+    spec = BackendSpec(name="u", options={"models_glob": [REAL]})
     backend = create_backend(spec)
     assert [c.id for c in backend.info.classes] == [1, 2, 3] and backend.info.magnifications == ["4x", "10x"]
     import cv2
@@ -119,3 +119,73 @@ def test_parallel_tile_error_propagates():
         raise RuntimeError("falló")
     with pytest.raises(RuntimeError):
         semantic.infer(boom, np.zeros((300, 300, 3), np.uint8), m, 128, 16, workers=3)
+
+
+YOLO = ("/home/martin/repos/imageprocessingcylinder/GUI_yolo/controllers/video/yolo/modelos/modelos entrenados/"
+        "yolov8/segmentacion/nano/v8_nano_28101904/outputs/train/weights/exportados/best.onnx")
+YOLO_BASE = {"schema": 1, "name": "y", "output": "instance-seg",
+             "input": {"normalize": "unit", "pad_multiple": 32, "imgsz": 640},
+             "decode": {"conf": 0.3, "iou": 0.6},
+             "classes": [{"id": 1, "name": "a", "color": [0, 255, 0]}, {"id": 2, "name": "b", "color": [255, 0, 0]}]}
+
+
+def test_parse_instance_seg():
+    m = parse_manifest(YOLO_BASE)
+    assert m.output == "instance-seg" and m.imgsz == 640 and (m.conf, m.iou) == (0.3, 0.6) and m.mean is None
+
+
+@pytest.mark.parametrize("change", [
+    {"input": {"normalize": "unit", "pad_multiple": 32}},                              # falta imgsz
+    {"input": {"imgsz": 640, "tta": ["hflip"]}},                                       # tta no aplica
+    {"input": {"imgsz": 0}}, {"decode": {"conf": 0}}, {"decode": {"conf": 1.5}}, {"decode": {"iou": 0}},
+])
+def test_parse_instance_seg_rejects(change):
+    with pytest.raises(BackendError):
+        parse_manifest({**YOLO_BASE, **change})
+
+
+def test_yolo_adapter_maps_model_channel_to_manifest_class_order():
+    """El canal i del modelo es classes[i]: la clase 1 del modelo se pinta con el id de classes[1]."""
+    from gui_segesferoides import yolo_seg
+    m = parse_manifest({**YOLO_BASE, "input": {"normalize": "unit", "pad_multiple": 32, "imgsz": 64},
+                        "classes": [{"id": 5, "name": "a", "color": [0, 0, 0]},
+                                    {"id": 9, "name": "b", "color": [0, 0, 0]}]})
+    # 4 caja + 2 clases + 1 coeficiente; un objeto de la clase 1 del modelo en el centro del letterbox 64x64
+    output0 = np.array([[[32.0], [32.0], [40.0], [40.0], [0.1], [0.9], [1.0]]], np.float32).transpose(0, 1, 2)
+    protos = np.full((1, 1, 16, 16), 5.0, np.float32)
+    seen = {}
+
+    def run(x):
+        seen["shape"] = x.shape
+        return output0, protos
+    mask = yolo_seg.infer(run, np.zeros((64, 64, 3), np.uint8), m)
+    assert seen["shape"] == (1, 3, 64, 64) and mask[32, 32] == 9 and mask[0, 0] == 0 and set(np.unique(mask)) == {0, 9}
+
+
+@pytest.mark.skipif(not os.path.exists(YOLO) or not os.path.exists(YOLO[:-5] + ".yaml"),
+                    reason="no está el modelo YOLO real")
+def test_real_yolo_model_with_manifest(tmp_path):
+    import cv2
+    backend = create_backend(BackendSpec(name="y", options={"models_glob": [YOLO]}))
+    assert backend._manifest.output == "instance-seg"
+    assert [(c.id, c.name) for c in backend.info.classes] == [(1, "Celula"), (2, "Esferoide"), (3, "Organoide")]
+    img = np.zeros((300, 400, 3), np.uint8)
+    path = str(tmp_path / "x.png")
+    cv2.imwrite(path, img)
+    mask = backend.predict(path, "10x")
+    assert mask.shape == (300, 400) and mask.dtype == np.uint8
+    assert backend.predict(path, "10x", bbox=(10, 10, 100, 80)).shape == (80, 100)
+
+
+def test_instance_seg_manifest_with_wrong_model_is_rejected(tmp_path):
+    """Un manifiesto instance-seg junto a un .onnx semántico: la prueba de humo lo rechaza al cargar."""
+    import shutil
+    src = REAL
+    if not os.path.exists(src):
+        pytest.skip("no está el modelo real")
+    shutil.copy(src, tmp_path / "m.onnx")
+    (tmp_path / "m.yaml").write_text(
+        "schema: 1\noutput: instance-seg\ninput: {imgsz: 64, pad_multiple: 32}\n"
+        "classes: [{id: 1, name: a, color: [0,255,0]}]\n")
+    with pytest.raises(BackendError):
+        create_backend(BackendSpec(name="y", options={"models_glob": [str(tmp_path / "m.onnx")]}))

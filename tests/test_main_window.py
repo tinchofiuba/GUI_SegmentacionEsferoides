@@ -1,16 +1,15 @@
-import json
 import re
-import sys
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
+from fake_backend import FakeBackend
 from PyQt5.QtCore import QEvent, QPointF, QSettings, Qt
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import QApplication, QFileDialog, QGroupBox, QMenu, QMessageBox, QShortcut
 
+from gui_segesferoides import main_window as main_window_module
 from gui_segesferoides.config import BackendSpec
 from gui_segesferoides.image_canvas import (
     TOOL_ANALYZE,
@@ -26,8 +25,6 @@ from gui_segesferoides.image_canvas import (
     TOOL_ZONE,
 )
 from gui_segesferoides.main_window import MainWindow
-
-FAKE = str(Path(__file__).parent / "fake_backend.py")
 
 
 @pytest.fixture(scope="module")
@@ -50,8 +47,9 @@ def wait_idle(qapp, window, timeout=20):
 def window(qapp, tmp_path, monkeypatch):
     QSettings.setPath(QSettings.NativeFormat, QSettings.UserScope, str(tmp_path / "qs"))
     monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: errors.append(a[2])))
+    monkeypatch.setattr(main_window_module, "create_backend", FakeBackend)
     errors.clear()
-    w = MainWindow([BackendSpec("fake", [sys.executable, FAKE])],
+    w = MainWindow([BackendSpec("fake")],
                    calibration_path=str(tmp_path / "calibration.json"),
                    postprocess_path=str(tmp_path / "postprocess.json"),
                    stats_path=str(tmp_path / "dataset_stats.json"))
@@ -224,43 +222,6 @@ def test_closing_dialog_deselects(window, image_path):
     assert window.particle is None and not window.canvas.highlight
 
 
-def test_uninstalled_backend_offers_install_then_connects(qapp, tmp_path, monkeypatch):
-    QSettings.setPath(QSettings.NativeFormat, QSettings.UserScope, str(tmp_path / "qs2"))
-    repo = tmp_path / "repo"
-    fake = str(Path(FAKE))
-    # "instalar" = crear el ejecutable que el comando espera (un wrapper al backend falso)
-    make = ("import os, sys; os.makedirs('bin'); open('bin/run', 'w').write("
-            f"'#!/bin/sh\\nexec {sys.executable} {fake}\\n'); os.chmod('bin/run', 0o755)")
-    spec = BackendSpec("inst", ["bin/run"], cwd=str(repo), install=[
-        [sys.executable, "-c", f"import os; os.makedirs({str(repo)!r})"],
-        [sys.executable, "-c", make]])
-    asked = []
-    monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
-    w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"),
-                   postprocess_path=str(tmp_path / "postprocess.json"),
-                   stats_path=str(tmp_path / "dataset_stats.json"))
-    qapp.processEvents()
-    assert w.backend is None and w.uninstalled is spec
-    assert not w.install_button.isHidden() and w.install_button.isEnabled()
-    w._on_install_clicked()
-    assert "bin/run" in asked[0] or "-c" in asked[0]
-    wait_idle(qapp, w)
-    assert w.uninstalled is None and w.backend is not None and w.install_button.isHidden()
-    assert w.combo_model.count() == 2
-    w.dirty = False
-    w.close()
-
-
-def test_uninstalled_without_install_steps_disables_button(qapp, tmp_path):
-    spec = BackendSpec("sin-pasos", ["no/existe"], cwd=str(tmp_path / "nada"))
-    w = MainWindow([spec], calibration_path=str(tmp_path / "calibration.json"),
-                   postprocess_path=str(tmp_path / "postprocess.json"),
-                   stats_path=str(tmp_path / "dataset_stats.json"))
-    assert w.uninstalled is spec and not w.install_button.isEnabled()
-    w.close()
-
-
 def test_export_results_writes_csv_and_id_png(qapp, window, image_path, tmp_path):
     import csv
 
@@ -423,14 +384,13 @@ def _predict_and_spy(qapp, window, image_path, rules=TEST_RULES):
     window.dataset_stats.set(TEST_STATS)
     window.postprocess_store.set(rules)
     sent = []
-    original = window.backend._request
+    original = window.backend.predict
 
-    def spy(cmd, **params):
-        if cmd == "predict":
-            sent.append(params)
-        return original(cmd, **params)
+    def spy(image_path, magnification, bbox=None):
+        sent.append({"image": image_path, "magnification": magnification, "bbox": bbox})
+        return original(image_path, magnification, bbox)
 
-    window.backend._request = spy
+    window.backend.predict = spy
     window.open_image(image_path)
     window._load_model("a")
     wait_idle(qapp, window)
@@ -442,7 +402,7 @@ def _predict_and_spy(qapp, window, image_path, rules=TEST_RULES):
 
 def test_predict_shows_discarded_contours_only_when_checked(qapp, window, image_path):
     sent = _predict_and_spy(qapp, window, image_path)
-    assert "postprocess" not in sent[0] and "discarded_out" not in sent[0]   # el backend da la máscara cruda
+    assert len(sent) == 1                                                    # el backend da la máscara cruda
     assert window.discarded is not None and window.discarded[150, 200] == 2  # el círculo central
     assert not window.mask.any()                                             # y ya no está en la máscara
     assert window.canvas.discarded == []                                     # checkbox apagado
@@ -501,7 +461,7 @@ def test_postprocess_can_be_turned_off_to_see_the_raw_mask(qapp, window, image_p
 
 
 def test_postprocess_button_does_not_depend_on_the_backend(qapp, window):
-    assert window.postprocess_button.isEnabled() and not window.backend.info.supports_postprocess
+    assert window.postprocess_button.isEnabled()
 
 
 def test_postprocess_dialog_edits_rules(qapp):
@@ -856,14 +816,13 @@ def test_predicting_after_leaving_the_zone_mode_covers_the_whole_image(qapp, win
 def _predict_and_spy_after(qapp, window, image_path):
     """Modo zona -> elige el pincel -> predice: lo que se manda es la imagen completa."""
     sent = []
-    original = window.backend._request
+    original = window.backend.predict
 
-    def spy(cmd, **params):
-        if cmd == "predict":
-            sent.append(params)
-        return original(cmd, **params)
+    def spy(image_path, magnification, bbox=None):
+        sent.append({"image": image_path, "magnification": magnification, "bbox": bbox})
+        return original(image_path, magnification, bbox)
 
-    window.backend._request = spy
+    window.backend.predict = spy
     window.open_image(image_path)
     window._load_model("a")
     wait_idle(qapp, window)

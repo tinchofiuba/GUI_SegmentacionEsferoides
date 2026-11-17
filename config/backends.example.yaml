@@ -1,56 +1,24 @@
 # Copiar a config/backends.yaml (ignorado por git) y ajustar rutas.
-# Cada backend es un proceso aparte con su propio Python: la GUI no importa
-# ningún modelo. Protocolo: docs/protocol.md.
+# La GUI solo corre modelos .onnx, dentro de su propio proceso: no conoce ningún repo de modelos.
+# Cada .onnx lleva al lado un manifiesto con el mismo nombre (best.onnx -> best.yaml) que dice cómo
+# usarlo: ver docs/model_manifest.md. `models_glob` lista los .onnx; el más reciente arranca cargado.
 backends:
+  # U-Net / U-ResNet (segmentación semántica: logits por píxel)
   - name: u-resnet
-    cwd: ~/repos/SegmentacionEsferoides
-    install:
-      - {cmd: [git, clone, "git@github.com:tinchofiuba/SegmentacionEsferoides.git", "{cwd}"], skip_if: "{cwd}/.git"}
-      - {cmd: [uv, sync], skip_if: "{cwd}/.venv"}
-    command:
-      - ~/repos/SegmentacionEsferoides/.venv/bin/python
-      - -m
-      - u_resnet_segesferoides.serve
-      - --models-dir
-      - outputs/models
-      - --model-name
-      - insitu_3t3
+    models_glob:
+      - ~/repos/SegmentacionEsferoides/outputs/models/*/*.onnx
 
-  # spheroid-seg (JAX, repo de otra persona): no habla el protocolo, así que se
-  # usa el backend `cli`. Cada predicción relanza el comando (~7-10 s de
-  # arranque). La GUI recorta la zona y le pasa el recorte; no hay magnificación.
-  # Los checkpoints se listan con `models_glob`; el más reciente arranca cargado.
-  # `cleanup` borra la carpeta outputs/infer/<run> que crea cada llamada (solo
-  # si está dentro de `cwd`).
-  - name: spheroid-seg
-    type: cli
-    cwd: ~/repos/spheroid-seg
-    install:                      # lo corre el botón "Instalar backend" si no está instalado
-      - {cmd: [git, clone, "https://github.com/edgardomarchi/spheroid-seg", "{cwd}"], skip_if: "{cwd}/.git"}
-      - {cmd: [uv, sync], skip_if: "{cwd}/.venv"}
-    command:
-      - .venv/bin/python
-      - -m
-      - spheroid_seg.infer
-      - --config
-      - configs/base.yaml
-      - --checkpoint
-      - "{model}"
-      - --input
-      - "{image}"
-    models_glob:                  # un patrón o una lista
-      - ~/repos/spheroid-seg/outputs/runs/*/checkpoints/best_checkpoint.msgpack
-      - ~/repos/spheroid-seg/colab_*/checkpoints/best_checkpoint.msgpack   # corridas bajadas de Colab
-    output_dir_regex: "Output directory: (.+)"
-    mask: "{output_dir}/predictions/{stem}.png"
-    cleanup: true
-    classes:                      # fondo / célula suelta / agregado (class_mapping de configs/base.yaml)
-      - {id: 1, name: células sueltas, color: [0, 255, 0]}
-      - {id: 2, name: agregados,       color: [255, 255, 0]}
-
-  # YOLOv8-seg exportado a .onnx, corre dentro de la GUI (sin proceso aparte).
-  # Las clases salen de la metadata del .onnx (ids 1..n); sin reglas de post-procesado.
+  # YOLOv8-seg (segmentación por instancias)
   - name: yolo
-    type: onnx
     models_glob:
       - "~/repos/imageprocessingcylinder/GUI_yolo/controllers/video/yolo/modelos/modelos entrenados/yolov8/segmentacion/*/*/outputs/train/weights/exportados/best.onnx"
+
+  # spheroid-seg: pendiente de exportar a .onnx (hoy es JAX). Cuando exista el .onnx y su manifiesto:
+  # - name: spheroid-seg
+  #   models_glob: [~/repos/spheroid-seg/outputs/onnx/*.onnx]
+
+# Opciones opcionales de cada backend (todas tienen valor por defecto):
+#   tile: 1024          mosaicos para imágenes grandes (0 = imagen entera)
+#   tile_overlap: 128   px de contexto por lado de cada mosaico
+#   workers: 4          mosaicos en paralelo (por defecto min(4, núcleos // 3))
+#   conf / iou          pisan los umbrales de un modelo instance-seg

@@ -1,7 +1,7 @@
 [project]
 name = "gui-segesferoides"
 version = "0.1.0"
-description = "GUI de escritorio para predecir, corregir y taggear máscaras de segmentación, independiente del modelo (habla con backends por un protocolo JSON)."
+description = "GUI de escritorio para predecir, corregir y taggear máscaras de segmentación; corre cualquier modelo ONNX descrito por un manifiesto."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

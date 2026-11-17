@@ -1,8 +1,12 @@
-"""Backend `onnx`: corre dentro de la GUI un modelo YOLOv8-seg exportado a .onnx
-(Ultralytics, `format=onnx`, sin NMS) con la misma interfaz que `SubprocessBackend`
-y `CliBackend`. Sin torch ni ultralytics: solo onnxruntime, numpy y OpenCV.
+"""Backend `onnx`: corre dentro de la GUI un modelo exportado a .onnx. Sin torch ni ultralytics:
+solo onnxruntime, numpy y OpenCV.
 
-Es un parche para comparar YOLO con los otros modelos: el modelo da *instancias*
+Si junto al `.onnx` hay un manifiesto `.yaml` (ver model_manifest.py), cómo usar el modelo sale de
+ahí y el adaptador de salida lo elige `output`: `semantic` (semantic.py) o `instance-seg` (yolo_seg.py).
+Sin manifiesto solo se entiende un YOLOv8-seg de Ultralytics, con lo que diga su metadata (camino
+heredado, abajo).
+
+Camino heredado: es un parche para comparar YOLO con los otros modelos: el modelo da *instancias*
 (caja + clase + máscara) y la GUI trabaja con una máscara de ids por píxel, así
 que se pintan las instancias de menor a mayor confianza (gana la más segura).
 El pre/post-procesado sigue a Ultralytics: letterbox al lado mayor = `imgsz`
@@ -13,15 +17,17 @@ Devuelve la máscara cruda: el post-procesado lo hace la GUI.
 """
 
 import ast
+import dataclasses
 import glob
 import os
 
 import cv2
 import numpy as np
 
-from gui_segesferoides import semantic
+from gui_segesferoides import semantic, yolo_seg
 from gui_segesferoides.backend import BackendError, BackendInfo, ClassInfo, ModelEntry
 from gui_segesferoides.model_manifest import load_manifest
+from gui_segesferoides.yolo_seg import decode, letterbox, paint_instances  # noqa: F401 - re-exportados
 
 DEFAULT_COLORS = [(0, 255, 0), (255, 255, 0), (255, 0, 255), (0, 255, 255), (255, 128, 0)]
 GENERIC_DIRS = {"exportados", "weights", "train", "outputs"}   # carpetas que no dicen qué modelo es
@@ -35,71 +41,14 @@ def _label(path):
     return os.path.basename(path)
 
 
-def letterbox(image, imgsz, stride):
-    """Escala para que el lado mayor sea `imgsz` y rellena (114) hasta múltiplos de
-    `stride`, centrado. Devuelve (imagen, escala, (izq, arriba))."""
-    h, w = image.shape[:2]
-    r = imgsz / max(h, w)
-    nh, nw = round(h * r), round(w * r)
-    resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR) if (nh, nw) != (h, w) else image
-    ph, pw = (-nh) % stride, (-nw) % stride
-    top, left = ph // 2, pw // 2
-    out = cv2.copyMakeBorder(resized, top, ph - top, left, pw - left, cv2.BORDER_CONSTANT, value=(114, 114, 114))
-    return out, r, (left, top)
-
-
-def decode(output0, num_classes, conf, iou):
-    """`output0` [4 + nc + nm, N] -> (cajas xywh en el letterbox, confianza, clase, coeficientes),
-    ya con umbral de confianza y NMS por clase."""
-    pred = output0.T
-    scores = pred[:, 4 : 4 + num_classes]
-    cls = scores.argmax(axis=1)
-    confidence = scores[np.arange(len(scores)), cls]
-    keep = confidence > conf
-    pred, cls, confidence = pred[keep], cls[keep], confidence[keep]
-    if not len(pred):
-        return np.zeros((0, 4)), confidence, cls, np.zeros((0, pred.shape[1] - 4 - num_classes))
-    boxes = pred[:, :4].astype(np.float64).copy()
-    boxes[:, 0] -= boxes[:, 2] / 2    # cx,cy,w,h -> x,y,w,h (esquina sup. izquierda)
-    boxes[:, 1] -= boxes[:, 3] / 2
-    idx = np.asarray(cv2.dnn.NMSBoxesBatched(boxes.tolist(), confidence.tolist(), cls.tolist(), conf, iou)).reshape(-1)
-    return boxes[idx], confidence[idx], cls[idx], pred[idx, 4 + num_classes :]
-
-
-def paint_instances(shape, boxes, confidence, cls, coefs, protos, scale, pad, class_ids, boxed_width):
-    """Máscara de ids (uint8) de tamaño `shape` (h, w) de la imagen original.
-    `boxes` (x, y, w, h) están en coordenadas del letterbox (ancho `boxed_width`);
-    `protos` [nm, mh, mw]."""
-    h, w = shape
-    out = np.zeros(shape, np.uint8)
-    nm, mh, mw = protos.shape
-    step = boxed_width / mw   # los protos están a 1/4 del letterbox
-    flat = protos.reshape(nm, -1)
-    left, top = pad
-    for i in np.argsort(confidence):   # de menos a más segura: la última pintada gana
-        x, y, bw, bh = boxes[i]
-        x0, y0 = max(int((x - left) / scale), 0), max(int((y - top) / scale), 0)
-        x1, y1 = min(int(np.ceil((x + bw - left) / scale)), w), min(int(np.ceil((y + bh - top) / scale)), h)
-        if x1 <= x0 or y1 <= y0:
-            continue
-        logits = (coefs[i] @ flat).reshape(mh, mw).astype(np.float32)
-        # destino (píxel de la zona de la caja) -> píxel del proto, solo escala + traslación
-        sx = scale / step
-        m = np.float32([[sx, 0, (x0 + 0.5) * sx + left / step - 0.5],
-                        [0, sx, (y0 + 0.5) * sx + top / step - 0.5]])
-        region = cv2.warpAffine(logits, m, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                                borderMode=cv2.BORDER_CONSTANT, borderValue=-20.0)
-        out[y0:y1, x0:x1][region > 0] = class_ids[int(cls[i])]
-    return out
-
-
 class OnnxBackend:
     """Opciones del YAML (todas opcionales salvo `models_glob`):
 
     models_glob   patrón (o lista) de archivos .onnx; el más reciente arranca cargado
     classes       [{id, name, color: [r, g, b]}]; si falta, salen de la metadata del
                   .onnx (`names`), con ids 1..n (0 es el fondo) y colores por defecto
-    conf, iou     umbral de confianza (0.25) y de NMS (0.7), como Ultralytics
+    conf, iou     umbral de confianza (0.25) y de NMS (0.7), como Ultralytics; con manifiesto
+                  los toma de él, y estas opciones (si están) lo pisan
     imgsz         lado mayor del letterbox; por defecto el de la metadata (o 640)
     tile, tile_overlap   (modelos con manifiesto) mosaicos de `tile` px (1024) con `tile_overlap`
                   px de contexto por lado (128) cuando la imagen es más grande; tile: 0 = entera
@@ -113,6 +62,7 @@ class OnnxBackend:
         globs = o["models_glob"]
         self.models_globs = [os.path.expanduser(g) for g in ([globs] if isinstance(globs, str) else globs)]
         self.conf, self.iou = float(o.get("conf", 0.25)), float(o.get("iou", 0.7))
+        self._overrides = {k: float(o[k]) for k in ("conf", "iou") if k in o}   # pisan al manifiesto
         self.imgsz = int(o["imgsz"]) if o.get("imgsz") else None
         self.tile = int(o.get("tile", 1024))          # modelos con manifiesto: 0 = imagen entera
         self.tile_overlap = int(o.get("tile_overlap", 128))
@@ -168,7 +118,8 @@ class OnnxBackend:
             raise BackendError(f"No se pudo abrir {model_id}: {exc}") from exc
         manifest = load_manifest(model_id)
         if manifest is not None:
-            self._check_semantic(session, manifest, model_id)
+            (self._check_semantic if manifest.output == "semantic" else self._check_instance_seg)(
+                session, manifest, model_id)
             self.info.classes = list(manifest.classes)
             self.info.magnifications = list(manifest.magnifications)
             self._session, self._meta, self._manifest, self.model = session, {}, manifest, model_id
@@ -199,6 +150,20 @@ class OnnxBackend:
         if logits.ndim != 4 or logits.shape[1] <= max(c.id for c in manifest.classes):
             raise BackendError(f"{path}: salida {logits.shape} no encaja con las clases del manifiesto")
 
+    @staticmethod
+    def _check_instance_seg(session, manifest, path):
+        """Prueba de humo: 2 salidas, y output0 con 4 (caja) + clases + coeficientes de máscara."""
+        if len(session.get_outputs()) != 2:
+            raise BackendError(f"{path}: instance-seg espera 2 salidas (detecciones y protos de máscara)")
+        probe = np.zeros((1, 3, manifest.pad_multiple * 2, manifest.pad_multiple * 2), np.float32)
+        try:
+            output0, protos = session.run(None, {session.get_inputs()[0].name: probe})
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"{path} no corre con su manifiesto: {exc}") from exc
+        if output0.ndim != 3 or protos.ndim != 4 or output0.shape[1] != 4 + len(manifest.classes) + protos.shape[1]:
+            raise BackendError(f"{path}: salidas {output0.shape}/{protos.shape} no encajan con "
+                               f"{len(manifest.classes)} clases del manifiesto")
+
     def predict(self, image_path, magnification, bbox=None):
         if self._session is None:
             raise BackendError("No hay ningún modelo cargado")
@@ -209,6 +174,15 @@ class OnnxBackend:
             x, y, w, h = (int(v) for v in bbox)
             bgr = bgr[y : y + h, x : x + w]
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        if self._manifest is not None and self._manifest.output == "instance-seg":
+            name = self._session.get_inputs()[0].name
+            manifest = self._manifest
+            if "conf" in self._overrides or "iou" in self._overrides:
+                manifest = dataclasses.replace(manifest, **self._overrides)
+            try:
+                return yolo_seg.infer(lambda t: self._session.run(None, {name: t}), rgb, manifest)
+            except Exception as exc:  # noqa: BLE001
+                raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc
         if self._manifest is not None:
             name = self._session.get_inputs()[0].name
             try:

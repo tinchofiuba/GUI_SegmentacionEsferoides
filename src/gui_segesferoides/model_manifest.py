@@ -1,7 +1,8 @@
 """Manifiesto de un modelo ONNX: el `.yaml` que va al lado del `.onnx` y le dice a la
 GUI cómo usarlo (normalización, relleno, clases...). Solo datos, nunca código: así un
 modelo nuevo o reentrenado se usa sin tocar la GUI mientras su salida sea de un tipo
-conocido (`semantic`). Sin Qt ni onnxruntime."""
+conocido: `semantic` (logits por píxel, el canal k es la clase con id k) o `instance-seg`
+(YOLOv8-seg; el canal i del modelo es `classes[i]`, en el orden de la lista). Sin Qt ni onnxruntime."""
 
 import os
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ import yaml
 from gui_segesferoides.backend import BackendError, ClassInfo
 
 SCHEMA = 1
-OUTPUTS = ("semantic",)
+OUTPUTS = ("semantic", "instance-seg")
 TTA_VIEWS = {"hflip", "vflip", "hvflip"}
 IMAGENET = {"mean": (0.485, 0.456, 0.406), "std": (0.229, 0.224, 0.225)}
 
@@ -25,6 +26,9 @@ class Manifest:
     std: tuple = None
     pad_multiple: int = 1
     tta: tuple = ()
+    imgsz: int = None             # instance-seg: lado mayor del letterbox
+    conf: float = 0.25            # instance-seg: umbral de confianza
+    iou: float = 0.7              # instance-seg: umbral de NMS
     magnifications: list = field(default_factory=list)
 
 
@@ -66,8 +70,21 @@ def parse_manifest(data, source="manifiesto"):
     if not classes or any(c.id <= 0 for c in classes) or len({c.id for c in classes}) != len(classes):
         raise BackendError(f"{source}: 'classes' vacío, con ids repetidos o <= 0 (0 es el fondo)")
     mean, std = _normalization(inp.get("normalize"))
+    extra = {}
+    if data["output"] == "instance-seg":
+        if tta:
+            raise BackendError(f"{source}: input.tta no aplica a instance-seg")
+        decode = data.get("decode") or {}
+        try:
+            extra = {"imgsz": int(inp["imgsz"]), "conf": float(decode.get("conf", 0.25)),
+                     "iou": float(decode.get("iou", 0.7))}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BackendError(f"{source}: instance-seg necesita input.imgsz numérico ({exc!r})") from exc
+        if extra["imgsz"] < 1 or not (0 < extra["conf"] < 1) or not (0 < extra["iou"] <= 1):
+            raise BackendError(f"{source}: imgsz >= 1, 0 < decode.conf < 1 y 0 < decode.iou <= 1")
     return Manifest(name=str(data.get("name", "")), output=data["output"], classes=classes, mean=mean, std=std,
-                    pad_multiple=pad, tta=tta, magnifications=[str(m) for m in data.get("magnifications") or []])
+                    pad_multiple=pad, tta=tta, magnifications=[str(m) for m in data.get("magnifications") or []],
+                    **extra)
 
 
 def load_manifest(onnx_path):

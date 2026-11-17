@@ -1,26 +1,15 @@
-"""Cliente del protocolo de backends de segmentación (ver docs/protocol.md).
+"""Tipos que comparten la GUI y los backends (hoy solo `OnnxBackend`, ver onnx_backend.py).
 
-La GUI no importa ningún modelo: cada backend es un proceso aparte (con su
-propio Python y dependencias) que habla JSON de una línea por stdin/stdout.
+Un backend expone: `info` (BackendInfo), `list_models()`, `load_model(id)`,
+`predict(image_path, magnification, bbox=None)` -> máscara uint8 con ids de clase, y `close()`.
 Sin Qt — se testea con un backend falso (tests/fake_backend.py).
 """
 
-import json
-import os
-import subprocess
-import tempfile
-import threading
-from collections import deque
 from dataclasses import dataclass
-
-import cv2
-import numpy as np
-
-PROTOCOL_VERSION = 1
 
 
 class BackendError(RuntimeError):
-    """El backend respondió con error, murió o rompió el protocolo."""
+    """El backend no pudo cargar el modelo o predecir."""
 
 
 @dataclass(frozen=True)
@@ -44,131 +33,7 @@ class BackendInfo:
     classes: list
     magnifications: list
     supports_bbox: bool = True
-    accepts_model_path: bool = False  # `load` acepta una ruta de carpeta arbitraria
-    supports_postprocess: bool = False  # legado: el backend post-procesa solo; se le pide la máscara cruda
-    protocol: int = PROTOCOL_VERSION
 
     @property
     def palette(self):
         return {c.id: c.color for c in self.classes}
-
-    @classmethod
-    def from_dict(cls, d):
-        if d.get("protocol") != PROTOCOL_VERSION:
-            raise BackendError(
-                f"El backend habla el protocolo {d.get('protocol')!r}, "
-                f"esta GUI espera {PROTOCOL_VERSION}"
-            )
-        classes = [ClassInfo(int(c["id"]), c["name"], tuple(c["color"])) for c in d["classes"]]
-        if any(c.id <= 0 for c in classes):
-            raise BackendError("Los ids de clase deben ser > 0 (0 es el fondo)")
-        return cls(
-            name=d["name"],
-            classes=classes,
-            magnifications=list(d.get("magnifications", [])),
-            supports_bbox=bool(d.get("supports_bbox", True)),
-            accepts_model_path=bool(d.get("accepts_model_path", False)),
-            supports_postprocess=bool(d.get("supports_postprocess", False)),
-        )
-
-
-class SubprocessBackend:
-    """Lanza `command` como proceso hijo y le habla por stdin/stdout.
-    Una sola petición a la vez (lock): el proceso mantiene el modelo cargado."""
-
-    def __init__(self, command, cwd=None, env=None):
-        self.command = list(command)
-        self._lock = threading.Lock()
-        self._next_id = 0
-        self._stderr_tail = deque(maxlen=40)
-        self._tmp = tempfile.TemporaryDirectory(prefix="gui_seg_")
-        full_env = {**os.environ, **(env or {}), "PYTHONUNBUFFERED": "1"}
-        try:
-            self._proc = subprocess.Popen(
-                self.command,
-                cwd=cwd,
-                env=full_env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            raise BackendError(f"No se pudo lanzar el backend {self.command}: {exc}") from exc
-        # Se drena stderr siempre: si se llena el pipe, el hijo se bloquea.
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
-        self.info = BackendInfo.from_dict(self._request("info"))
-
-    def _drain_stderr(self):
-        for line in self._proc.stderr:
-            self._stderr_tail.append(line.rstrip())
-
-    def _request(self, cmd, **params):
-        with self._lock:
-            if self._proc.poll() is not None:
-                raise BackendError(self._death_message())
-            self._next_id += 1
-            req_id = self._next_id
-            try:
-                self._proc.stdin.write(json.dumps({"id": req_id, "cmd": cmd, **params}) + "\n")
-                self._proc.stdin.flush()
-                line = self._proc.stdout.readline()
-            except (BrokenPipeError, OSError) as exc:
-                raise BackendError(self._death_message()) from exc
-            if not line:
-                raise BackendError(self._death_message())
-            try:
-                resp = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise BackendError(f"Respuesta inválida del backend: {line[:200]!r}") from exc
-            if resp.get("id") != req_id:
-                raise BackendError(f"Respuesta desfasada (id {resp.get('id')} != {req_id})")
-            if not resp.get("ok"):
-                raise BackendError(resp.get("error", "error desconocido del backend"))
-            return resp.get("result")
-
-    def _death_message(self):
-        tail = "\n".join(self._stderr_tail)
-        return f"El backend terminó (código {self._proc.poll()}).\n{tail}".strip()
-
-    # ---------- API ----------
-    def list_models(self):
-        return [ModelEntry(**m) for m in self._request("list_models")]
-
-    def load_model(self, model_id):
-        """Devuelve la descripción del modelo cargado (texto)."""
-        return self._request("load", model=model_id).get("description", model_id)
-
-    def predict(self, image_path, magnification, bbox=None):
-        """Devuelve la máscara cruda (uint8, ids de clase) del recorte `bbox`
-        (x, y, w, h en píxeles nativos) o de la imagen completa. El post-procesado
-        lo hace la GUI (postprocess.py)."""
-        out = os.path.join(self._tmp.name, "pred.png")
-        params = {}
-        if self.info.supports_postprocess:
-            params["postprocess"] = {"rules": [], "fill_holes": []}   # sin reglas: máscara cruda
-        result = self._request(
-            "predict",
-            image=os.path.abspath(image_path),
-            magnification=magnification,
-            bbox=list(bbox) if bbox is not None else None,
-            out=out,
-            **params,
-        )
-        mask = cv2.imread(result["mask"], cv2.IMREAD_UNCHANGED)
-        if mask is None or mask.ndim != 2:
-            raise BackendError("El backend devolvió una máscara ilegible (se espera PNG de 1 canal)")
-        return mask.astype(np.uint8)
-
-    def close(self):
-        if self._proc.poll() is None:
-            try:
-                self._request("shutdown")
-            except BackendError:
-                pass
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-        self._tmp.cleanup()

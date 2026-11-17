@@ -1,70 +1,45 @@
-"""Backend falso del protocolo (solo numpy/cv2), para testear la GUI sin
-ningún modelo. Predice un círculo de clase 2 centrado en la región pedida.
-
-    python tests/fake_backend.py [--crash-on-predict]
-"""
-
-import json
-import sys
+"""Backend falso en proceso (solo numpy/cv2), para testear la GUI sin ningún modelo.
+Predice un círculo de clase 2 centrado en la región pedida. Misma interfaz que OnnxBackend."""
 
 import cv2
 import numpy as np
 
-CRASH = "--crash-on-predict" in sys.argv
-INFO = {
-    "protocol": 1,
-    "name": "fake",
-    "classes": [
-        {"id": 1, "name": "chicas", "color": [0, 255, 0]},
-        {"id": 2, "name": "grandes", "color": [255, 255, 0]},
-        {"id": 5, "name": "raras", "color": [0, 255, 255]},
-    ],
-    "magnifications": ["4x", "10x"],
-    "supports_bbox": True,
-}
-loaded = None
+from gui_segesferoides.backend import BackendError, BackendInfo, ClassInfo, ModelEntry
 
 
-def handle(req):
-    global loaded
-    cmd = req["cmd"]
-    if cmd == "info":
-        return INFO
-    if cmd == "list_models":
-        return [{"id": "a", "label": "Modelo A"}, {"id": "b", "label": "Modelo B", "note": "en curso"}]
-    if cmd == "load":
-        if req["model"] == "malo":
-            raise ValueError("no existe ese modelo")
-        loaded = req["model"]
-        return {"description": f"fake:{loaded}"}
-    if cmd == "predict":
-        if CRASH:
-            sys.exit(3)
-        img = cv2.imread(req["image"])
+class FakeBackend:
+    def __init__(self, spec=None):
+        self.info = BackendInfo(
+            name="fake",
+            classes=[ClassInfo(1, "chicas", (0, 255, 0)), ClassInfo(2, "grandes", (255, 255, 0)),
+                     ClassInfo(5, "raras", (0, 255, 255))],
+            magnifications=["4x", "10x"],
+            supports_bbox=True,
+        )
+        self.model = None
+        self.crash_on_predict = False
+
+    def list_models(self):
+        return [ModelEntry("a", "Modelo A", current=self.model == "a"),
+                ModelEntry("b", "Modelo B", "en curso", current=self.model == "b")]
+
+    def load_model(self, model_id):
+        if model_id == "malo":
+            raise BackendError("no existe ese modelo")
+        self.model = model_id
+        return f"fake:{model_id}"
+
+    def predict(self, image_path, magnification, bbox=None):
+        if self.crash_on_predict:
+            raise BackendError("el backend falló")
+        img = cv2.imread(image_path)
         if img is None:
-            raise ValueError("no se pudo leer la imagen")
+            raise BackendError("no se pudo leer la imagen")
         h, w = img.shape[:2]
-        x, y, bw, bh = req["bbox"] or (0, 0, w, h)
+        x, y, bw, bh = bbox or (0, 0, w, h)
         mask = np.zeros((bh, bw), np.uint8)
         cv2.circle(mask, (bw // 2, bh // 2), max(1, min(bw, bh) // 4), 2, -1)
-        cv2.imwrite(req["out"], mask)
-        result = {"mask": req["out"]}
-        return result
-    raise ValueError(f"comando desconocido: {cmd}")
+        return mask
 
-
-def main():
-    for line in sys.stdin:
-        req = json.loads(line)
-        if req["cmd"] == "shutdown":
-            print(json.dumps({"id": req["id"], "ok": True, "result": None}), flush=True)
-            return
-        try:
-            resp = {"id": req["id"], "ok": True, "result": handle(req)}
-        except Exception as exc:  # noqa: BLE001
-            resp = {"id": req["id"], "ok": False, "error": str(exc)}
-        print(json.dumps(resp), flush=True)
-
-
-if __name__ == "__main__":
-    main()
+    def close(self):
+        pass

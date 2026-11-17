@@ -32,15 +32,45 @@ def test_paint_instances_higher_confidence_wins_and_maps_back():
     assert mask[5, 5] == 1 and mask[40, 40] == 2 and mask[20, 20] == 1 and mask[60, 5] == 0
 
 
-def test_config_onnx_needs_no_command(tmp_path):
+def test_config_reads_models_glob_and_options(tmp_path):
     path = tmp_path / "b.yaml"
-    path.write_text("backends:\n  - name: y\n    type: onnx\n    models_glob: [/no/existe/*.onnx]\n")
+    path.write_text("backends:\n  - name: y\n    models_glob: [/no/existe/*.onnx]\n    tile: 512\n")
     (spec,) = load_backends(str(path))
-    assert spec.type == "onnx" and spec.command == []
+    assert spec.name == "y" and spec.options == {"models_glob": ["/no/existe/*.onnx"], "tile": 512}
     with pytest.raises(BackendError):
         create_backend(spec)    # ni modelo ni classes
 
 
+def test_config_accepts_explicit_type_onnx(tmp_path):
+    path = tmp_path / "b.yaml"
+    path.write_text("backends:\n  - name: y\n    type: onnx\n    models_glob: [x.onnx]\n")
+    (spec,) = load_backends(str(path))
+    assert "type" not in spec.options
+
+
+@pytest.mark.parametrize("entry", [
+    "name: a\n    command: [python, serve.py]\n    models_glob: [x]",                 # backend por subproceso
+    "name: a\n    type: cli\n    models_glob: [x]",                                    # programa externo
+    "name: a\n    install: [[uv, sync]]\n    models_glob: [x]",
+    "name: a\n    cwd: /repo\n    models_glob: [x]",
+])
+def test_config_rejects_removed_backend_kinds(tmp_path, entry):
+    path = tmp_path / "b.yaml"
+    path.write_text(f"backends:\n  - {entry}\n")
+    with pytest.raises(ValueError, match="ya no existe"):
+        load_backends(str(path))
+
+
+def test_config_requires_name_and_models_glob(tmp_path):
+    path = tmp_path / "b.yaml"
+    path.write_text("backends:\n  - models_glob: [x]\n")
+    with pytest.raises(ValueError, match="name"):
+        load_backends(str(path))
+    path.write_text("backends:\n  - name: a\n")
+    with pytest.raises(ValueError, match="models_glob"):
+        load_backends(str(path))
+
+
 def test_missing_models_glob():
     with pytest.raises(BackendError):
-        create_backend(BackendSpec(name="y", type="onnx"))
+        create_backend(BackendSpec(name="y"))
