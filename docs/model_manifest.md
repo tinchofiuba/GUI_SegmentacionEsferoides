@@ -50,6 +50,26 @@ decode:
   iou: 0.7                     # umbral de NMS por clase
 ```
 
+## `options`: controles del modelo
+
+Opcional. Cada entrada crea un control en el panel "Predicción" de la GUI. El `id` debe ser una
+opción que el adaptador del `output` sabe aplicar; el tipo de control lo fija el id:
+
+| output | id | control | default si no se pone |
+|---|---|---|---|
+| `semantic` | `tta` | checkbox (requiere `input.tta`) | `true` |
+| `instance-seg` | `conf` | número en [0.01, 0.99] | `decode.conf` |
+| `instance-seg` | `iou` | número en [0.01, 1.0] | `decode.iou` |
+
+```yaml
+options:
+  - {id: tta, label: Utilizar TTA}
+  - {id: conf, label: Confianza, default: 0.4}
+```
+
+La GUI no interpreta las opciones: al cambiar un control llama a `backend.set_option(id, valor)`, y el
+adaptador aplica el valor en la siguiente predicción. Sin `options` el modelo no muestra controles.
+
 ## Al cargar
 
 La GUI hace una prueba de humo (corre una imagen vacía) y rechaza con un mensaje claro un manifiesto

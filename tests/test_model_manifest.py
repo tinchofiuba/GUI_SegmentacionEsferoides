@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 
 from gui_segesferoides import semantic
-from gui_segesferoides.backend import BackendError
+from gui_segesferoides.backend import BackendError, OptionSpec
 from gui_segesferoides.config import BackendSpec, create_backend
-from gui_segesferoides.model_manifest import IMAGENET, load_manifest, parse_manifest
+from gui_segesferoides.model_manifest import IMAGENET, load_manifest, manifest_path, parse_manifest
 
 REAL = "/home/martin/repos/SegmentacionEsferoides/outputs/models/insitu_3t3_2026-10-06/UResNet_1006.onnx"
 
@@ -189,3 +189,73 @@ def test_instance_seg_manifest_with_wrong_model_is_rejected(tmp_path):
         "classes: [{id: 1, name: a, color: [0,255,0]}]\n")
     with pytest.raises(BackendError):
         create_backend(BackendSpec(name="y", options={"models_glob": [str(tmp_path / "m.onnx")]}))
+
+
+def test_options_default_to_tta_on_and_take_custom_label():
+    m = parse_manifest(with_(options=[{"id": "tta", "label": "Utilizar TTA"}]))
+    assert m.options == (OptionSpec("tta", "checkbox", "Utilizar TTA", True),)
+
+
+def test_no_options_key_means_no_controls():
+    assert parse_manifest(BASE).options == ()
+
+
+@pytest.mark.parametrize("bad", [
+    with_(options=[{"id": "rot90"}]),                                     # id que el adaptador no conoce
+    with_(options=[{"id": "tta"}, {"id": "tta"}]),                         # repetida
+    with_(options=[{"label": "sin id"}]),
+    with_(options=[{"id": "tta", "default": "si"}]),                       # checkbox sin bool
+    with_(input={"normalize": "unit"}, options=[{"id": "tta"}]),           # tta sin vistas
+    with_(options="tta"),
+])
+def test_options_reject(bad):
+    with pytest.raises(BackendError):
+        parse_manifest(bad)
+
+
+IS = {"schema": 1, "output": "instance-seg", "input": {"imgsz": 640},
+      "decode": {"conf": 0.3, "iou": 0.6}, "classes": [{"id": 1, "name": "a", "color": [0, 255, 0]}]}
+
+
+def test_instance_seg_number_options_default_from_decode():
+    m = parse_manifest({**IS, "options": [{"id": "conf"}, {"id": "iou", "label": "NMS"}]})
+    assert m.options == (OptionSpec("conf", "number", "conf", 0.3, 0.01, 0.99),
+                         OptionSpec("iou", "number", "NMS", 0.6, 0.01, 1.0))
+
+
+def test_instance_seg_rejects_out_of_range_default():
+    with pytest.raises(BackendError):
+        parse_manifest({**IS, "options": [{"id": "conf", "default": 1.5}]})
+
+
+@pytest.mark.skipif(not os.path.exists(REAL), reason="no está el modelo real")
+def test_set_option_tta_changes_the_views_used_for_inference(tmp_path, monkeypatch):
+    import shutil
+    model = tmp_path / "m.onnx"                       # copia: el manifiesto real no declara controles
+    shutil.copy(REAL, model)
+    yaml_text = open(manifest_path(REAL), encoding="utf-8").read()
+    (tmp_path / "m.yaml").write_text(yaml_text + "options:\n  - {id: tta, label: Utilizar TTA}\n", encoding="utf-8")
+    backend = create_backend(BackendSpec(name="u", options={"models_glob": [str(model)]}))
+    assert [o.id for o in backend.info.options] == ["tta"] and backend.info.options[0].default is True
+    seen = []
+    real_infer = semantic.infer
+
+    def spy(run, rgb, manifest, *args, **kwargs):
+        seen.append(manifest.tta)
+        return real_infer(run, rgb, manifest, *args, **kwargs)
+    monkeypatch.setattr(semantic, "infer", spy)
+    import cv2
+    img = np.zeros((70, 90, 3), np.uint8)
+    cv2.circle(img, (45, 35), 25, (200, 200, 200), -1)
+    path = str(tmp_path / "x.png")
+    cv2.imwrite(path, img)
+    backend.predict(path, "4x")
+    backend.set_option("tta", False)
+    backend.predict(path, "4x")
+    backend.set_option("tta", True)
+    backend.predict(path, "4x")
+    assert seen == [("hflip", "vflip", "hvflip"), (), ("hflip", "vflip", "hvflip")]
+    with pytest.raises(BackendError):
+        backend.set_option("tta", "no")
+    with pytest.raises(BackendError):
+        backend.set_option("rot90", True)

@@ -20,6 +20,7 @@ import ast
 import dataclasses
 import glob
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -62,7 +63,7 @@ class OnnxBackend:
         globs = o["models_glob"]
         self.models_globs = [os.path.expanduser(g) for g in ([globs] if isinstance(globs, str) else globs)]
         self.conf, self.iou = float(o.get("conf", 0.25)), float(o.get("iou", 0.7))
-        self._overrides = {k: float(o[k]) for k in ("conf", "iou") if k in o}   # pisan al manifiesto
+        self._overrides = {k: float(o[k]) for k in ("conf", "iou") if k in o}   # pisan el default del manifiesto
         self.imgsz = int(o["imgsz"]) if o.get("imgsz") else None
         self.tile = int(o.get("tile", 1024))          # modelos con manifiesto: 0 = imagen entera
         self.tile_overlap = int(o.get("tile_overlap", 128))
@@ -75,6 +76,8 @@ class OnnxBackend:
         self._session = None
         self._meta = {}
         self._manifest = None
+        self._lock = threading.Lock()     # protege _option_values: la GUI escribe en el hilo principal
+        self._option_values = {}
         declared = o.get("classes")
         self._declared = [ClassInfo(int(c["id"]), c["name"], tuple(c["color"])) for c in declared or []]
         self.info = BackendInfo(
@@ -123,6 +126,10 @@ class OnnxBackend:
             self.info.classes = list(manifest.classes)
             self.info.magnifications = list(manifest.magnifications)
             self._session, self._meta, self._manifest, self.model = session, {}, manifest, model_id
+            self.info.options = list(manifest.options)
+            with self._lock:
+                self._option_values = {spec.id: self._overrides.get(spec.id, spec.default)
+                                       for spec in manifest.options}
             return manifest.name or _label(model_id)
         meta = session.get_modelmeta().custom_metadata_map
         if meta.get("task") != "segment" or len(session.get_outputs()) != 2:
@@ -137,6 +144,9 @@ class OnnxBackend:
         else:
             self.info.classes = list(self._declared)
         self._session, self._meta, self._manifest, self.model = session, meta, None, model_id
+        self.info.options = []
+        with self._lock:
+            self._option_values = {}
         return _label(model_id)
 
     @staticmethod
@@ -164,6 +174,34 @@ class OnnxBackend:
             raise BackendError(f"{path}: salidas {output0.shape}/{protos.shape} no encajan con "
                                f"{len(manifest.classes)} clases del manifiesto")
 
+    def set_option(self, option_id, value):
+        """Cambia una opción declarada en el manifiesto (`info.options`). Se aplica a la siguiente
+        predicción; una predicción en curso sigue con los valores que tenía al empezar."""
+        spec = next((o for o in self.info.options if o.id == option_id), None)
+        if spec is None:
+            raise BackendError(f"El modelo no tiene la opción {option_id!r}")
+        if spec.type == "checkbox":
+            if not isinstance(value, bool):
+                raise BackendError(f"La opción {option_id!r} acepta solo true/false")
+        else:
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise BackendError(f"La opción {option_id!r} necesita un número") from exc
+            if not spec.min <= value <= spec.max:
+                raise BackendError(f"La opción {option_id!r} debe estar entre {spec.min} y {spec.max}")
+        with self._lock:
+            self._option_values[option_id] = value
+
+    def _effective_manifest(self, values):
+        """Manifiesto con los valores de las opciones aplicados (copia; el original no cambia)."""
+        m = self._manifest
+        if m.output == "semantic":
+            return m if values.get("tta", True) else dataclasses.replace(m, tta=())
+        conf = values.get("conf", self._overrides.get("conf", m.conf))   # sin control: rige el YAML del backend
+        iou = values.get("iou", self._overrides.get("iou", m.iou))
+        return dataclasses.replace(m, conf=conf, iou=iou)
+
     def predict(self, image_path, magnification, bbox=None):
         if self._session is None:
             raise BackendError("No hay ningún modelo cargado")
@@ -176,17 +214,18 @@ class OnnxBackend:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         if self._manifest is not None and self._manifest.output == "instance-seg":
             name = self._session.get_inputs()[0].name
-            manifest = self._manifest
-            if "conf" in self._overrides or "iou" in self._overrides:
-                manifest = dataclasses.replace(manifest, **self._overrides)
+            with self._lock:
+                manifest = self._effective_manifest(dict(self._option_values))
             try:
                 return yolo_seg.infer(lambda t: self._session.run(None, {name: t}), rgb, manifest)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc
         if self._manifest is not None:
             name = self._session.get_inputs()[0].name
+            with self._lock:
+                manifest = self._effective_manifest(dict(self._option_values))
             try:
-                return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, self._manifest,
+                return semantic.infer(lambda t: self._session.run(None, {name: t})[0], rgb, manifest,
                                       self.tile, self.tile_overlap, self.workers)
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(f"Falló la inferencia ONNX: {exc}") from exc

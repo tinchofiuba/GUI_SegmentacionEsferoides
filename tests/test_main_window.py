@@ -1592,3 +1592,20 @@ def test_the_removing_lasso_over_background_changes_nothing(qapp, window, image_
     window.tool_buttons[TOOL_LASSO_REMOVE].setChecked(True)
     _lasso_triangle(window)
     assert not window.mask.any() and not window.dirty
+
+
+def test_manifest_options_become_controls_and_reach_the_backend(qapp, window):
+    from gui_segesferoides.backend import OptionSpec
+    window.backend.info.options = [OptionSpec("tta", "checkbox", "Utilizar TTA", True),
+                                   OptionSpec("conf", "number", "Confianza", 0.25, 0.01, 0.99)]
+    window._rebuild_option_controls()
+    box = window.option_widgets["tta"]
+    assert box.text() == "Utilizar TTA" and box.isChecked()
+    box.setChecked(False)
+    assert window.backend.options_set == [("tta", False)]
+    window.option_widgets["conf"].setValue(0.4)
+    assert window.backend.options_set[-1][0] == "conf" and abs(window.backend.options_set[-1][1] - 0.4) < 1e-9
+    window.backend.info.options = []           # un modelo sin opciones no deja controles
+    window._rebuild_option_controls()
+    assert window.option_widgets == {}
+

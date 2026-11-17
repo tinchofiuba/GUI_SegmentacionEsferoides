@@ -18,6 +18,7 @@ class FakeBackend:
         )
         self.model = None
         self.crash_on_predict = False
+        self.options_set = []     # [(id, valor)] de las llamadas a set_option
 
     def list_models(self):
         return [ModelEntry("a", "Modelo A", current=self.model == "a"),
@@ -40,6 +41,9 @@ class FakeBackend:
         mask = np.zeros((bh, bw), np.uint8)
         cv2.circle(mask, (bw // 2, bh // 2), max(1, min(bw, bh) // 4), 2, -1)
         return mask
+
+    def set_option(self, option_id, value):
+        self.options_set.append((option_id, value))
 
     def close(self):
         pass

@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -34,6 +35,7 @@ from PyQt5.QtWidgets import (
 )
 
 from gui_segesferoides import postprocess
+from gui_segesferoides.backend import BackendError
 from gui_segesferoides.calibration import MAGNIFICATIONS, PX, Calibration
 from gui_segesferoides.calibration_dialog import CalibrationDialog
 from gui_segesferoides.config import BackendSpec, create_backend
@@ -311,6 +313,26 @@ class MainWindow(QMainWindow):
         self.combo_magnification.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.combo_magnification.currentTextChanged.connect(self._update_scale)
         g.addWidget(row(QLabel("Magnificación:"), self.combo_magnification))
+        # controles que declara el modelo en su manifiesto (info.options); se rehacen al cambiar de modelo.
+        # Recuadro con título propio (no QGroupBox: el panel tiene un QGroupBox por función).
+        # Son opciones particulares de ese modelo, no de la GUI.
+        self.option_group = QFrame()
+        self.option_group.setObjectName("opcionesModelo")
+        self.option_group.setStyleSheet(
+            "QFrame#opcionesModelo { background: #f6f1e4; border: 1px solid #d8c79a; border-radius: 4px; }"
+            " QLabel#tituloOpcionesModelo { font-weight: bold; color: #5c4b1e; background: transparent; }")
+        self.option_group.setToolTip("Opciones que declara el modelo en su manifiesto; "
+                                     "cambian cómo predice ese modelo, no la GUI.")
+        frame_layout = QVBoxLayout(self.option_group)
+        title = QLabel("Opciones internas del modelo")
+        title.setObjectName("tituloOpcionesModelo")
+        frame_layout.addWidget(title)
+        self.option_layout = QVBoxLayout()
+        self.option_layout.setSpacing(1)
+        frame_layout.addLayout(self.option_layout)
+        self.option_widgets = {}
+        self.option_group.setVisible(False)
+        g.addWidget(self.option_group)
         self.predict_button = QPushButton("Predecir")
         self.predict_button.clicked.connect(self._on_predict_clicked)
         self.predict_button.setEnabled(False)
@@ -667,6 +689,8 @@ class MainWindow(QMainWindow):
         free = not self.busy
         self.combo_backend.setEnabled(free and len(self.specs) > 1)
         self.combo_model.setEnabled(free and has_backend)
+        for widget in self.option_widgets.values():
+            widget.setEnabled(free and has_backend)
         self.export_button.setEnabled(free and has_backend and self.mask is not None)
         self.save_image_button.setEnabled(self.full_res_image is not None)
         self.postprocess_button.setEnabled(free)
@@ -719,9 +743,42 @@ class MainWindow(QMainWindow):
         elif self.image_path:
             self._select_magnification_from_name(self.image_path)
         self._fill_models(models)
+        self._rebuild_option_controls()
         self._update_controls()
         self.canvas.update()
         self.status_label.setText(f"Backend '{info.name}' listo.")
+
+    def _rebuild_option_controls(self):
+        """Un checkbox o spinbox por cada opción del modelo cargado; sus valores van a set_option."""
+        while self.option_layout.count():
+            item = self.option_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.option_widgets = {}
+        options = self.backend.info.options if self.backend is not None else []
+        self.option_group.setVisible(bool(options))
+        for spec in options:
+            if spec.type == "checkbox":
+                widget = QCheckBox(spec.label)
+                widget.setChecked(bool(spec.default))
+                widget.toggled.connect(lambda on, oid=spec.id: self._on_option_changed(oid, on))
+            else:
+                widget = QDoubleSpinBox()
+                widget.setPrefix(f"{spec.label}: ")
+                widget.setRange(spec.min, spec.max)
+                widget.setDecimals(2)
+                widget.setSingleStep(0.05)
+                widget.setValue(float(spec.default))
+                widget.valueChanged.connect(lambda v, oid=spec.id: self._on_option_changed(oid, v))
+            self.option_layout.addWidget(widget)
+            self.option_widgets[spec.id] = widget
+        self._update_controls()
+
+    def _on_option_changed(self, option_id, value):
+        try:
+            self.backend.set_option(option_id, value)
+        except BackendError as exc:
+            QMessageBox.warning(self, "Opción del modelo", str(exc))
 
     def _fill_models(self, models):
         self.combo_model.clear()
@@ -751,6 +808,7 @@ class MainWindow(QMainWindow):
 
         def refresh_models(_description):
             self.model_loaded = True
+            self._rebuild_option_controls()   # cada modelo trae sus propias opciones
             self.status_label.setText(f"Modelo cargado: {_description}")
             if self.combo_model.findData(model_id) < 0:
                 self.combo_model.addItem(os.path.basename(model_id.rstrip("/")), model_id)
