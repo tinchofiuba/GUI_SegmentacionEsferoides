@@ -6,11 +6,32 @@ corre modelos **ONNX** (con `onnxruntime`, sin torch ni repos de modelos), y cad
 `.onnx` lleva al lado un manifiesto `.yaml` que dice cómo usarlo — ver
 [docs/model_manifest.md](docs/model_manifest.md).
 
+## Instalación (Windows 10/11, Linux, macOS)
+
+Solo hace falta Python (lo instala `uv`); no se necesita torch, GPU ni el repo del modelo.
+
+1. Instalar [uv](https://docs.astral.sh/uv/getting-started/installation/). En Windows (PowerShell):
+   `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+2. Descargar/clonar este repo, abrir una terminal en su carpeta y correr `uv sync`.
+3. Conseguir un modelo: una carpeta con `<modelo>.onnx` y `<modelo>.yaml` (el manifiesto). Lo genera
+   el repo del modelo (`u-resnet-export-onnx` / al terminar un entrenamiento) o te lo pasan ya hecho.
+4. `uv run gui-segesferoides`, y en la GUI el botón **Instalar modelo...** → elegir el `.onnx`.
+   Se copia (con su `.yaml`) a `./models/<modelo>/` y queda cargado. Alternativa manual: copiar la
+   carpeta a `models/`.
+
+**Actualizar modelos:** si el YAML de backends tiene `models_index_url` (ver
+`config/backends.example.yaml`), aparece **Buscar modelos nuevos**: baja el índice publicado por el repo
+del modelo, compara el sha256 de cada `.onnx` con el instalado y descarga los nuevos o cambiados (verifica
+la integridad antes de instalar). El más reciente queda cargado. Código: `model_update.py`.
+
+Siempre se lanza desde la raíz del repo (las rutas de `models/` son relativas). Sin
+`config/backends.yaml` se usa `config/backends.example.yaml` (modelos en `./models`); para otras
+rutas copiarlo a `config/backends.yaml` y editarlo.
+
 ## Uso
 
 ```bash
 uv sync --group dev
-cp config/backends.example.yaml config/backends.yaml   # ajustar rutas
 uv run gui-segesferoides
 ```
 

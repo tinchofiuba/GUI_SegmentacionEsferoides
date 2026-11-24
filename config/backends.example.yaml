@@ -1,21 +1,25 @@
-# Copiar a config/backends.yaml (ignorado por git) y ajustar rutas.
+# Sin config/backends.yaml la GUI usa este archivo. Para personalizar: copiarlo a
+# config/backends.yaml (ignorado por git) y ajustar rutas.
 # La GUI solo corre modelos .onnx, dentro de su propio proceso: no conoce ningún repo de modelos.
 # Cada .onnx lleva al lado un manifiesto con el mismo nombre (best.onnx -> best.yaml) que dice cómo
 # usarlo: ver docs/model_manifest.md. `models_glob` lista los .onnx; el más reciente arranca cargado.
+# Las rutas relativas se resuelven desde la carpeta donde se lanza la GUI (la raíz del repo);
+# `~` es la carpeta del usuario (también en Windows).
+# Índice de modelos publicado por el repo del modelo (JSON, ver model_update.py). Con esta clave
+# aparece el botón "Buscar modelos nuevos". Ejemplo con GitHub Releases (repo público):
+# models_index_url: https://github.com/tinchofiuba/SegmentacionEsferoides/releases/latest/download/models.json
 backends:
-  # U-Net / U-ResNet (segmentación semántica: logits por píxel)
+  # U-Net / U-ResNet (segmentación semántica: logits por píxel).
+  # Instalación de modelos: copiar la carpeta de cada modelo (con su .onnx y .yaml) dentro de ./models/
   - name: u-resnet
     models_glob:
-      - ~/repos/SegmentacionEsferoides/outputs/models/*/*.onnx
+      - models/*.onnx
+      - models/*/*.onnx
 
-  # YOLOv8-seg (segmentación por instancias)
-  - name: yolo
-    models_glob:
-      - "~/repos/imageprocessingcylinder/GUI_yolo/controllers/video/yolo/modelos/modelos entrenados/yolov8/segmentacion/*/*/outputs/train/weights/exportados/best.onnx"
-
-  # spheroid-seg: pendiente de exportar a .onnx (hoy es JAX). Cuando exista el .onnx y su manifiesto:
-  # - name: spheroid-seg
-  #   models_glob: [~/repos/spheroid-seg/outputs/onnx/*.onnx]
+  # YOLOv8-seg (segmentación por instancias): descomentar si se tienen modelos YOLO exportados.
+  # - name: yolo
+  #   models_glob:
+  #     - models/yolo/*.onnx
 
 # Opciones opcionales de cada backend (todas tienen valor por defecto):
 #   tile: 1024          mosaicos para imágenes grandes (0 = imagen entera)

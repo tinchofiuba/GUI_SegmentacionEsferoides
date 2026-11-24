@@ -221,3 +221,6 @@ __marimo__/
 
 # Config local de backends (rutas de esta máquina)
 config/backends.yaml
+
+# Modelos .onnx + manifiestos (se distribuyen aparte, no en git)
+models/

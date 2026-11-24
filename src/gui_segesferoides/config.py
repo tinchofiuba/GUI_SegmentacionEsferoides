@@ -44,3 +44,10 @@ def load_backends(path):
         specs.append(BackendSpec(name=entry["name"],
                                  options={k: v for k, v in entry.items() if k not in ("name", "type")}))
     return specs
+
+
+def load_index_url(path):
+    """URL del índice de modelos (clave `models_index_url` de nivel superior), o None."""
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("models_index_url") or None

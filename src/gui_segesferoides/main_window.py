@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from gui_segesferoides import postprocess
+from gui_segesferoides import model_update, postprocess
 from gui_segesferoides.backend import BackendError
 from gui_segesferoides.calibration import MAGNIFICATIONS, PX, Calibration
 from gui_segesferoides.calibration_dialog import CalibrationDialog
@@ -74,6 +74,7 @@ from gui_segesferoides.image_canvas import (
     ImageCanvas,
 )
 from gui_segesferoides.measures import MEASURE_COLORS, render_measures
+from gui_segesferoides.model_install import install_model, models_dir_for
 from gui_segesferoides.particle_dialog import SELECTED, ParticleDialog
 from gui_segesferoides.postprocess_dialog import PostprocessDialog
 from gui_segesferoides.postprocess_store import PostprocessStore
@@ -137,7 +138,7 @@ class CallWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, specs, calibration_path=None, postprocess_path=None, stats_path=None):
+    def __init__(self, specs, calibration_path=None, postprocess_path=None, stats_path=None, index_url=None):
         super().__init__()
         self.calibration = Calibration(calibration_path)
         self.postprocess_store = PostprocessStore(postprocess_path)
@@ -149,6 +150,7 @@ class MainWindow(QMainWindow):
         self.specs = list(specs)             # [BackendSpec]
         self.backend = None                  # OnnxBackend conectado
         self.model_loaded = False
+        self.index_url = index_url
         self.palette = {}                    # {id de clase: (r, g, b)}, del backend
         self.busy = False                    # una llamada al backend en curso
         self.worker = None
@@ -240,6 +242,15 @@ class MainWindow(QMainWindow):
         self.combo_model.setMinimumWidth(280)
         self.combo_model.activated.connect(self._on_model_selected)
         top.addWidget(self.combo_model)
+        self.install_model_button = QPushButton("Instalar modelo...")
+        self.install_model_button.setToolTip("Copia un .onnx (con su .yaml) a la carpeta de modelos")
+        self.install_model_button.clicked.connect(self._on_install_model)
+        top.addWidget(self.install_model_button)
+        self.update_models_button = QPushButton("Buscar modelos nuevos")
+        self.update_models_button.setToolTip("Consulta el índice de modelos publicado y baja los nuevos o actualizados")
+        self.update_models_button.clicked.connect(self._on_check_updates)
+        self.update_models_button.setVisible(bool(self.index_url))
+        top.addWidget(self.update_models_button)
         return top
 
     def _build_side_panel(self):
@@ -794,6 +805,60 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(-1)
             self.status_label.setText("Elegí un modelo para poder predecir.")
+
+    def _on_install_model(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Elegir modelo (.onnx)", "", "Modelos ONNX (*.onnx)")
+        if not path:
+            return
+        spec = self.combo_backend.currentData()
+        folder = models_dir_for(spec.options.get("models_glob") if spec else None)
+        try:
+            install_model(path, folder)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Instalar modelo", str(exc))
+            return
+        if spec is not None:
+            self._connect_backend(spec)   # relee la carpeta; el recién instalado queda cargado
+        self.status_label.setText(f"Modelo instalado en {folder}")
+
+    def _models_folder(self):
+        spec = self.combo_backend.currentData()
+        return models_dir_for(spec.options.get("models_glob") if spec else None)
+
+    def _on_check_updates(self):
+        folder = self._models_folder()
+
+        def check():
+            return model_update.pending_updates(model_update.fetch_index(self.index_url), folder)
+
+        def found(pending):
+            if not pending:
+                self.status_label.setText("Los modelos están al día.")
+                QMessageBox.information(self, "Modelos", "No hay modelos nuevos.")
+                return
+            lines = "\n".join(f"- {m.name}" + (f": {m.notes}" if m.notes else "") for m in pending)
+            if QMessageBox.question(self, "Modelos nuevos", f"Hay modelos para instalar:\n{lines}\n\n¿Descargarlos?") \
+                    != QMessageBox.Yes:
+                return
+            self._download_models(pending, folder)
+
+        self._run_async(check, found, self._on_update_failed, "Buscando modelos nuevos...")
+
+    def _download_models(self, pending, folder):
+        def download():
+            return [model_update.download_model(m, folder) for m in pending]
+
+        def done(paths):
+            spec = self.combo_backend.currentData()
+            if spec is not None:
+                self._connect_backend(spec)   # relee la carpeta; el último descargado queda cargado
+            self.status_label.setText(f"Modelos instalados: {', '.join(os.path.basename(p) for p in paths)}")
+
+        self._run_async(download, done, self._on_update_failed, "Descargando modelos...")
+
+    def _on_update_failed(self, message):
+        self.status_label.setText("No se pudieron actualizar los modelos.")
+        QMessageBox.critical(self, "Actualizar modelos", message)
 
     def _on_backend_selected(self, index):
         spec = self.combo_backend.itemData(index)

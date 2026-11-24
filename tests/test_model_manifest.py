@@ -8,7 +8,9 @@ from gui_segesferoides.backend import BackendError, OptionSpec
 from gui_segesferoides.config import BackendSpec, create_backend
 from gui_segesferoides.model_manifest import IMAGENET, load_manifest, manifest_path, parse_manifest
 
-REAL = "/home/martin/repos/SegmentacionEsferoides/outputs/models/insitu_3t3_2026-10-06/UResNet_1006.onnx"
+# Tests con modelos reales: opcionales. Apuntar a un .onnx (con su .yaml al lado) por variable de entorno;
+# sin ella se saltan.
+REAL = os.environ.get("GUI_TEST_UNET_ONNX", "")
 
 BASE = {"schema": 1, "name": "m", "output": "semantic",
         "input": {"normalize": "imagenet", "pad_multiple": 32, "tta": ["hflip"]},
@@ -121,8 +123,7 @@ def test_parallel_tile_error_propagates():
         semantic.infer(boom, np.zeros((300, 300, 3), np.uint8), m, 128, 16, workers=3)
 
 
-YOLO = ("/home/martin/repos/imageprocessingcylinder/GUI_yolo/controllers/video/yolo/modelos/modelos entrenados/"
-        "yolov8/segmentacion/nano/v8_nano_28101904/outputs/train/weights/exportados/best.onnx")
+YOLO = os.environ.get("GUI_TEST_YOLO_ONNX", "")
 YOLO_BASE = {"schema": 1, "name": "y", "output": "instance-seg",
              "input": {"normalize": "unit", "pad_multiple": 32, "imgsz": 640},
              "decode": {"conf": 0.3, "iou": 0.6},
