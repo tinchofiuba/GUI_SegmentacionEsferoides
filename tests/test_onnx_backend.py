@@ -37,8 +37,7 @@ def test_config_reads_models_glob_and_options(tmp_path):
     path.write_text("backends:\n  - name: y\n    models_glob: [/no/existe/*.onnx]\n    tile: 512\n")
     (spec,) = load_backends(str(path))
     assert spec.name == "y" and spec.options == {"models_glob": ["/no/existe/*.onnx"], "tile": 512}
-    with pytest.raises(BackendError):
-        create_backend(spec)    # ni modelo ni classes
+    assert create_backend(spec).list_models() == []    # sin modelos arranca igual (ver test de abajo)
 
 
 def test_config_accepts_explicit_type_onnx(tmp_path):
@@ -74,3 +73,15 @@ def test_config_requires_name_and_models_glob(tmp_path):
 def test_missing_models_glob():
     with pytest.raises(BackendError):
         create_backend(BackendSpec(name="y"))
+
+
+def test_backend_starts_without_models_and_refuses_to_predict(tmp_path):
+    import pytest
+
+    from gui_segesferoides.backend import BackendError
+    from gui_segesferoides.config import BackendSpec, create_backend
+
+    backend = create_backend(BackendSpec(name="u", options={"models_glob": [str(tmp_path / "*.onnx")]}))
+    assert backend.list_models() == []
+    with pytest.raises(BackendError):
+        backend.predict("x.png", "10x")

@@ -224,3 +224,4 @@ config/backends.yaml
 
 # Modelos .onnx + manifiestos (se distribuyen aparte, no en git)
 models/
+config/backends.old.yaml

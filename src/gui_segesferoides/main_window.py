@@ -804,7 +804,9 @@ class MainWindow(QMainWindow):
             self.combo_model.setCurrentIndex(current)
         else:
             self.combo_model.setCurrentIndex(-1)
-            self.status_label.setText("Elegí un modelo para poder predecir.")
+            self.status_label.setText(
+                "Elegí un modelo para poder predecir." if models else
+                "No hay modelos instalados: usá «Instalar modelo...» o «Buscar modelos nuevos».")
 
     def _on_install_model(self):
         path, _ = QFileDialog.getOpenFileName(self, "Elegir modelo (.onnx)", "", "Modelos ONNX (*.onnx)")

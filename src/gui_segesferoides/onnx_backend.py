@@ -89,9 +89,7 @@ class OnnxBackend:
         models = self._scan_models()
         if models:
             self.load_model(models[0].id)
-        elif not declared:
-            raise BackendError(f"Backend onnx '{spec.name}': no hay ningún .onnx en {self.models_globs} "
-                               "ni 'classes' declaradas")
+        # sin modelos el backend arranca igual (instalación nueva): la GUI avisa y ofrece instalar uno
 
     # ---------- API ----------
     def _scan_models(self):
