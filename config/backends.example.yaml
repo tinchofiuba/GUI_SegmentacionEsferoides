@@ -7,7 +7,7 @@
 # `~` es la carpeta del usuario (también en Windows).
 # Índice de modelos publicado por el repo del modelo (JSON, ver model_update.py). Con esta clave
 # aparece el botón "Buscar modelos nuevos". Ejemplo con GitHub Releases (repo público):
-# models_index_url: https://github.com/tinchofiuba/SegmentacionEsferoides/releases/latest/download/models.json
+models_index_url: https://github.com/tinchofiuba/SegmentacionEsferoides/releases/latest/download/models.json
 backends:
   # U-Net / U-ResNet (segmentación semántica: logits por píxel).
   # Instalación de modelos: copiar la carpeta de cada modelo (con su .onnx y .yaml) dentro de ./models/
