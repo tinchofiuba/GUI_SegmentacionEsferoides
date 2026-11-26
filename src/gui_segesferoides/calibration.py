@@ -74,7 +74,7 @@ class Calibration:
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         data = {"display_unit": self.display_unit, "csv_stats": self.csv_stats,
-                "magnifications": {m: {"length": l, "unit": u} for m, (l, u) in self.entries.items()}}
+                "magnifications": {m: {"length": length, "unit": u} for m, (length, u) in self.entries.items()}}
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 

@@ -165,7 +165,8 @@ def test_render_draws_the_label_where_the_offset_puts_it(qapp):
     out_moved = render_measures(img, [moved], scale)
     hx, hy = int(home_rect.center().x()), int(home_rect.center().y())
     nx, ny = int(new_rect.center().x()), int(new_rect.center().y())
-    dark = lambda out, x, y: out[y, x].sum() < 3 * 150            # la caja de la etiqueta oscurece el fondo
+    def dark(out, x, y):                                 # la caja de la etiqueta oscurece el fondo
+        return out[y, x].sum() < 3 * 150
     assert dark(out_home, hx, hy) and not dark(out_home, nx, ny)
     assert dark(out_moved, nx, ny) and not dark(out_moved, hx, hy)  # se fue de su lugar de siempre
 

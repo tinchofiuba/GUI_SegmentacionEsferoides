@@ -267,7 +267,8 @@ class ParticleDialog(QDialog):
             r = (reference or {}).get(ref_key)
             self.bars[key].setVisible(bool(r))
             if r:
-                fmt = lambda v, kind=kind: format_value(kind, v, self.scale)
+                def fmt(v, kind=kind):
+                    return format_value(kind, v, self.scale)
                 self.bars[key].set_data(stats[key], r["p5"], r["p95"], r["mean"],
                                         f"{fmt(r['p5'])} – {fmt(r['p95'])}")
         panel = self.reference_panel
@@ -282,7 +283,8 @@ class ParticleDialog(QDialog):
     def _reference_content(self, key):
         """(título, valor actual, ref, conteos) del detalle de la métrica `key`."""
         _key, ref_key, title, kind = next(m for m in METRICS if m[0] == key)
-        fmt = lambda v: format_value(kind, v, self.scale)
+        def fmt(v):
+            return format_value(kind, v, self.scale)
         ref = {**self.reference[ref_key], "fmt": fmt, "n": self.reference["n"],
                "magnification": self.magnification,
                "class_label": self._class_names.get(self.current_class, str(self.current_class))}

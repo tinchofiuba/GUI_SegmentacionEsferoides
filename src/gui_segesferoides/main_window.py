@@ -1553,7 +1553,8 @@ class MainWindow(QMainWindow):
 
     def _discarded_text(self, reason):
         names = {c.id: c.name for c in self.backend.info.classes} if self.backend else {}
-        label = lambda cid: f"{cid} - {names[cid]}" if cid in names else str(cid)
+        def label(cid):
+            return f"{cid} - {names[cid]}" if cid in names else str(cid)
         metrics = {"area": ("Área", "px²", 0), "diameter": ("Diámetro equivalente", "px", 1),
                    "circularity": ("Circularidad", "", 3), "perimeter": ("Perímetro", "px", 1)}
         ops = {"lt": "<", "le": "≤", "gt": ">", "ge": "≥"}

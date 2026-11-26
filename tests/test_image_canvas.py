@@ -460,7 +460,8 @@ def test_the_label_is_painted_on_screen_where_it_was_moved(qapp):
     c.measures[0] = c.measures[0].with_label_offset((60.0, 70.0))
     moved = c._label_rect_view(0).center()
     image = c.grab().toImage()
-    dark = lambda p: image.pixelColor(int(p.x()), int(p.y())).lightness() < 150   # la caja oscura de la etiqueta
+    def dark(p):                                         # la caja oscura de la etiqueta
+        return image.pixelColor(int(p.x()), int(p.y())).lightness() < 150
     assert dark(moved) and not dark(home)
 
 

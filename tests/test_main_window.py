@@ -324,7 +324,8 @@ def test_calibration_dialog_edits_calibration(qapp, tmp_path):
     cal = Calibration(str(tmp_path / "c.json"))
     d = CalibrationDialog(cal)
     spin, unit = d.rows["10x"]
-    spin.setValue(1); unit.setCurrentText("mm")
+    spin.setValue(1)
+    unit.setCurrentText("mm")
     d.combo_display.setCurrentText("µm")
     d._accept()
     assert cal.um_per_px("10x") == 1000 and cal.um_per_px("4x") is None
